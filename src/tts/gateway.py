@@ -81,7 +81,8 @@ async def _try_gemini(text: str, http: httpx.AsyncClient) -> bytes | None:
         return None
     try:
         resp = await http.post(
-            f"{_GEMINI_BASE}?key={_GEMINI_API_KEY}",
+            _GEMINI_BASE,
+            headers={"x-goog-api-key": _GEMINI_API_KEY},
             json={
                 "contents": [{"parts": [{"text": text}]}],
                 "generationConfig": {
