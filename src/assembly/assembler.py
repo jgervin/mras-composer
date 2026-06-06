@@ -20,8 +20,10 @@ async def assemble(base_video: Path, audio: Path, trigger_id: str) -> Path:
     out = _OUTPUT_DIR / f"{trigger_id}.mp4"
 
     async with _sem():
-        tmp = Path(tempfile.mktemp(suffix=".mp4", dir=_OUTPUT_DIR))
+        tmp: Path | None = None
+        proc = None
         try:
+            tmp = Path(tempfile.mktemp(suffix=".mp4", dir=_OUTPUT_DIR))
             proc = await asyncio.create_subprocess_exec(
                 "ffmpeg", "-y",
                 "-i", str(base_video), "-i", str(audio),
@@ -38,6 +40,11 @@ async def assemble(base_video: Path, audio: Path, trigger_id: str) -> Path:
             tmp.rename(out)
             return out
         except Exception:
-            if tmp.exists():
+            if proc is not None:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+            if tmp is not None and tmp.exists():
                 tmp.unlink(missing_ok=True)
             raise
