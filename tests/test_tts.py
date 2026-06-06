@@ -40,21 +40,31 @@ async def test_cache_miss_calls_elevenlabs_and_stores_file(tmp_path):
     assert "elevenlabs" in http.post.call_args[0][0]
 
 
-async def test_elevenlabs_fail_falls_back_to_misoone(tmp_path):
+async def test_elevenlabs_fail_falls_back_to_gemini(tmp_path):
     fail_resp = MagicMock()
     fail_resp.raise_for_status = MagicMock(side_effect=Exception("EL 500"))
-    success_resp = _resp(b"miso-audio")
+    success_resp = MagicMock()
+    success_resp.raise_for_status = MagicMock()
+    # Gemini returns JSON with base64 PCM
+    import base64, json
+    pcm = b"\x00\x01" * 100
+    success_resp.json = MagicMock(return_value={
+        "candidates": [{"content": {"parts": [{"inlineData": {
+            "data": base64.b64encode(pcm).decode(),
+            "mimeType": "audio/L16;rate=24000"
+        }}]}}]
+    })
 
     http = AsyncMock()
     http.post = AsyncMock(side_effect=[fail_resp, success_resp])
 
     with patch("src.tts.gateway._CACHE_DIR", tmp_path), \
          patch("src.tts.gateway._EL_API_KEY", "el-key"), \
-         patch("src.tts.gateway._MISO_KEY", "miso-key"):
+         patch("src.tts.gateway._GEMINI_API_KEY", "gemini-key"):
         result = await synthesize("Hello Charlie", "uuid-3", "v1", http)
 
     assert result is not None
-    assert result.read_bytes() == b"miso-audio"
+    assert result.suffix == ".wav"
     assert http.post.call_count == 2
 
 
@@ -64,7 +74,7 @@ async def test_all_providers_fail_returns_none(tmp_path):
 
     with patch("src.tts.gateway._CACHE_DIR", tmp_path), \
          patch("src.tts.gateway._EL_API_KEY", "el-key"), \
-         patch("src.tts.gateway._MISO_KEY", "miso-key"):
+         patch("src.tts.gateway._GEMINI_API_KEY", "gemini-key"):
         result = await synthesize("Hello Dave", "uuid-4", "v1", http)
 
     assert result is None
