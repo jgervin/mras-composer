@@ -2,10 +2,12 @@ import asyncio
 import os
 import tempfile
 from pathlib import Path
+from typing import Optional
 
 _TIMEOUT = int(os.getenv("FFMPEG_TIMEOUT", "10"))
 _OUTPUT_DIR = Path(os.getenv("ASSEMBLED_OUTPUT_DIR", "/tmp/assembled"))
-_SEMAPHORE: asyncio.Semaphore | None = None
+_FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+_SEMAPHORE: Optional[asyncio.Semaphore] = None
 
 
 def _sem() -> asyncio.Semaphore:
@@ -15,19 +17,43 @@ def _sem() -> asyncio.Semaphore:
     return _SEMAPHORE
 
 
-async def assemble(base_video: Path, audio: Path, trigger_id: str) -> Path:
+async def assemble(
+    base_video: Path,
+    audio: Path,
+    trigger_id: str,
+    overlay_text: Optional[str] = None,
+) -> Path:
     _OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     out = _OUTPUT_DIR / f"{trigger_id}.mp4"
 
     async with _sem():
-        tmp: Path | None = None
+        tmp: Optional[Path] = None
+        text_file: Optional[Path] = None
         proc = None
         try:
             tmp = Path(tempfile.mktemp(suffix=".mp4", dir=_OUTPUT_DIR))
+
+            if overlay_text:
+                # Write text to a temp file to avoid shell-escaping issues with names
+                tf = tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False)
+                tf.write(overlay_text)
+                tf.close()
+                text_file = Path(tf.name)
+                filter_complex = (
+                    f"[0:v]drawtext="
+                    f"fontfile={_FONT}:"
+                    f"textfile={text_file}:"
+                    f"fontsize=12:x=20:y=h-30:fontcolor=white[v];"
+                    f"[0:a][1:a]amix=inputs=2:duration=first[a]"
+                )
+                extra_args = ["-filter_complex", filter_complex, "-map", "[v]", "-map", "[a]"]
+            else:
+                extra_args = ["-filter_complex", "amix=inputs=2:duration=first"]
+
             proc = await asyncio.create_subprocess_exec(
                 "ffmpeg", "-y",
                 "-i", str(base_video), "-i", str(audio),
-                "-filter_complex", "amix=inputs=2:duration=first",
+                *extra_args,
                 "-c:v", "libx264", "-preset", "fast",
                 "-c:a", "aac",
                 str(tmp),
@@ -48,3 +74,6 @@ async def assemble(base_video: Path, audio: Path, trigger_id: str) -> Path:
             if tmp is not None and tmp.exists():
                 tmp.unlink(missing_ok=True)
             raise
+        finally:
+            if text_file is not None and text_file.exists():
+                text_file.unlink(missing_ok=True)
