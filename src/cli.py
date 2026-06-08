@@ -15,7 +15,6 @@ Example:
 import argparse
 import asyncio
 import logging
-import os
 import random
 import shutil
 import subprocess
@@ -26,6 +25,15 @@ from pathlib import Path
 from src.assembly.assembler import assemble
 
 logger = logging.getLogger("mras-composer.cli")
+
+# Generated clips land here — on the local device, easy to find, and deliberately
+# NOT the kiosk rotation pool. Play them yourself; the kiosk never sees them.
+DEFAULT_OUTPUT_DIR = Path.home() / "Desktop" / "mras-clips"
+
+
+def default_assets_dir() -> Path:
+    """Base videos are picked from the kiosk rotation pool: <code>/mras-ops/assets."""
+    return Path(__file__).resolve().parents[2] / "mras-ops" / "assets"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -40,12 +48,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--video", help="Base video file. Overrides --assets.")
     p.add_argument(
-        "--assets", default=os.getenv("ASSETS_DIR", "assets"),
-        help="Directory to pick a random .mp4 from when --video is omitted.",
+        "--assets", default=str(default_assets_dir()),
+        help="Directory to pick a random base .mp4 from when --video is omitted "
+             "(default: the kiosk pool, read-only).",
     )
-    p.add_argument("--out", help="Write the assembled clip here (default: assembler output dir).")
+    p.add_argument("--out", help="Write the clip to this exact path (overrides --out-dir).")
+    p.add_argument(
+        "--out-dir", default=str(DEFAULT_OUTPUT_DIR),
+        help=f"Folder for generated clips (default: {DEFAULT_OUTPUT_DIR}).",
+    )
+    p.add_argument("--open", action="store_true", help="Open the clip when done (macOS).")
     p.add_argument("--trigger-id", help="Output basename / id (default: cli-<timestamp>).")
     return p
+
+
+def resolve_output_path(out, out_dir, trigger_id: str) -> Path:
+    if out:
+        return Path(out).expanduser()
+    return Path(out_dir).expanduser() / f"{trigger_id}.mp4"
 
 
 def parse_items(raw: list[list[str]]) -> list[tuple[int, str]]:
@@ -100,15 +120,15 @@ async def run(argv=None) -> Path:
     log_draw_directives(draw_items)
 
     trigger_id = args.trigger_id or f"cli-{int(time.time())}"
-    out = await assemble(base, inserts, trigger_id)
+    out_path = resolve_output_path(args.out, args.out_dir, trigger_id)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    if args.out:
-        final = Path(args.out)
-        final.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(out), final)
-        out = final
-    logger.info("assembled: %s", out)
-    return out
+    produced = await assemble(base, inserts, trigger_id)
+    shutil.move(str(produced), out_path)
+    logger.info("assembled: %s", out_path)
+    if args.open:
+        subprocess.run(["open", str(out_path)], check=False)
+    return out_path
 
 
 def main(argv=None) -> None:
