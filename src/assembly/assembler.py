@@ -21,9 +21,22 @@ def _sem() -> asyncio.Semaphore:
     return _SEMAPHORE
 
 
+def _audio_filter(offsets: list[int]) -> str:
+    """Build the ffmpeg audio graph: each inserted track (inputs 1..N) is delayed by
+    its mark (floored at _INSERT_MIN_OFFSET_MS) and mixed over the base audio (input 0)."""
+    parts: list[str] = []
+    labels = ["[0:a]"]
+    for i, off in enumerate(offsets, start=1):
+        off = max(off, _INSERT_MIN_OFFSET_MS)
+        parts.append(f"[{i}:a]adelay={off}|{off}[a{i}]")
+        labels.append(f"[a{i}]")
+    parts.append(f"{''.join(labels)}amix=inputs={len(offsets) + 1}:duration=first[a]")
+    return ";".join(parts)
+
+
 async def assemble(
     base_video: Path,
-    audio: Path,
+    audio_inserts: list[tuple[Path, int]],
     trigger_id: str,
     overlay_text: Optional[str] = None,
 ) -> Path:
@@ -37,6 +50,7 @@ async def assemble(
         try:
             tmp = Path(tempfile.mktemp(suffix=".mp4", dir=_OUTPUT_DIR))
 
+            audio_fc = _audio_filter([off for _, off in audio_inserts])
             if overlay_text:
                 # Write text to a temp file to avoid shell-escaping issues with names
                 tf = tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False)
@@ -48,20 +62,19 @@ async def assemble(
                     f"fontfile={_FONT}:"
                     f"textfile={text_file}:"
                     f"fontsize=12:x=20:y=h-30:fontcolor=white[v];"
-                    f"[1:a]adelay={_INSERT_MIN_OFFSET_MS}|{_INSERT_MIN_OFFSET_MS}[a1];"
-                    f"[0:a][a1]amix=inputs=2:duration=first[a]"
+                    f"{audio_fc}"
                 )
                 extra_args = ["-filter_complex", filter_complex, "-map", "[v]", "-map", "[a]"]
             else:
-                filter_complex = (
-                    f"[1:a]adelay={_INSERT_MIN_OFFSET_MS}|{_INSERT_MIN_OFFSET_MS}[a1];"
-                    f"[0:a][a1]amix=inputs=2:duration=first[a]"
-                )
-                extra_args = ["-filter_complex", filter_complex, "-map", "0:v", "-map", "[a]"]
+                extra_args = ["-filter_complex", audio_fc, "-map", "0:v", "-map", "[a]"]
+
+            inputs: list[str] = ["-i", str(base_video)]
+            for path, _ in audio_inserts:
+                inputs += ["-i", str(path)]
 
             proc = await asyncio.create_subprocess_exec(
                 "ffmpeg", "-y",
-                "-i", str(base_video), "-i", str(audio),
+                *inputs,
                 *extra_args,
                 "-c:v", "libx264", "-preset", "fast",
                 "-c:a", "aac",
