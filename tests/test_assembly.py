@@ -71,6 +71,50 @@ async def test_ffmpeg_nonzero_exit_raises_and_cleans_up(tmp_path, monkeypatch):
     assert list(tmp_path.glob("*.mp4")) == []
 
 
+def _capture_exec(captured):
+    async def fake_exec(*args, **kwargs):
+        captured["args"] = list(args)
+        out_path = args[-1]
+        proc = MagicMock()
+        proc.returncode = 0
+
+        async def communicate():
+            Path(out_path).touch()
+            return (b"", b"")
+
+        proc.communicate = communicate
+        return proc
+
+    return fake_exec
+
+
+def _filter_complex(args):
+    return args[args.index("-filter_complex") + 1]
+
+
+async def test_inserted_audio_delayed_past_first_250ms_default(tmp_path, monkeypatch):
+    monkeypatch.setattr(asm_mod, "_OUTPUT_DIR", tmp_path)
+    captured = {}
+    with patch("asyncio.create_subprocess_exec", side_effect=_capture_exec(captured)):
+        await assemble(tmp_path / "base.mp4", tmp_path / "audio.mp3", "trig-delay")
+
+    # Input 1 is the inserted name/speech; it must not sound in the first 250ms.
+    assert "[1:a]adelay=250|250" in _filter_complex(captured["args"])
+
+
+async def test_inserted_audio_delayed_past_first_250ms_with_overlay(tmp_path, monkeypatch):
+    monkeypatch.setattr(asm_mod, "_OUTPUT_DIR", tmp_path)
+    captured = {}
+    with patch("asyncio.create_subprocess_exec", side_effect=_capture_exec(captured)):
+        await assemble(
+            tmp_path / "base.mp4", tmp_path / "audio.mp3", "trig-overlay", overlay_text="Jordan"
+        )
+
+    fc = _filter_complex(captured["args"])
+    assert "[1:a]adelay=250|250" in fc
+    assert "drawtext" in fc  # overlay text still applied alongside the delay
+
+
 async def test_semaphore_serializes_concurrent_calls(tmp_path, monkeypatch):
     monkeypatch.setattr(asm_mod, "_OUTPUT_DIR", tmp_path)
     events: list[str] = []
