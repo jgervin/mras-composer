@@ -26,6 +26,7 @@ def test_render_overlay_builds_prores_argv_and_props(tmp_path):
     args = captured["args"]
     assert "remotion" in args and "render" in args and "Overlay" in args
     assert "--codec=prores" in args and "--prores-profile=4444" in args
+    assert "--pixel-format=yuva444p10le" in args  # alpha plane (else overlay composites opaque)
     assert str(out) in args and out.suffix == ".mov"
     assert captured["cwd"] == "/tmp/ov"
 
