@@ -8,6 +8,7 @@ from typing import Set
 
 import httpx
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -24,6 +25,15 @@ _OUTPUT_DIR = Path(os.getenv("ASSEMBLED_OUTPUT_DIR", "/tmp/assembled"))
 _VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "")
 _HOST = os.getenv("HOST", "localhost")
 _PORT = int(os.getenv("PORT", "8002"))
+
+
+def build_playlist(assets_dir: Path, base_url: str) -> list[str]:
+    """Idle-rotation videos: every assets/*.mp4 as a full URL, sorted by name.
+
+    Drop a .mp4 into the assets dir and it joins the kiosk's idle rotation.
+    """
+    names = sorted(p.name for p in assets_dir.glob("*.mp4"))
+    return [f"{base_url}/assets/{name}" for name in names]
 
 
 class WSManager:
@@ -61,9 +71,17 @@ async def lifespan(app: FastAPI):
 _OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title="mras-composer", lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware, allow_origins=["*"], allow_methods=["GET"], allow_headers=["*"]
+)
 app.mount("/media", StaticFiles(directory=str(_OUTPUT_DIR)), name="media")
 if _ASSETS_DIR.exists():
     app.mount("/assets", StaticFiles(directory=str(_ASSETS_DIR)), name="assets")
+
+
+@app.get("/playlist")
+def playlist():
+    return {"videos": build_playlist(_ASSETS_DIR, f"http://{_HOST}:{_PORT}")}
 
 
 class TriggerPayload(BaseModel):
