@@ -11,7 +11,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from src.assembly.assembler import assemble
+from src.assembly.assembler import _INSERT_MIN_OFFSET_MS, assemble
 from src.db import create_pool
 from src.selector.selector import select
 from src.tts.gateway import synthesize
@@ -97,7 +97,9 @@ async def trigger_endpoint(body: TriggerPayload):
     await _log(app.state.db, body.trigger_id, "tts_attempt", "success", {})
 
     try:
-        video_path = await assemble(selection.base_video, audio_path, body.trigger_id)
+        video_path = await assemble(
+            selection.base_video, [(audio_path, _INSERT_MIN_OFFSET_MS)], body.trigger_id
+        )
     except Exception as exc:
         await _log(app.state.db, body.trigger_id, "assembly", "error", {"error": str(exc)})
         return {"status": "assembly_failed"}
