@@ -8,6 +8,11 @@ import src.assembly.assembler as asm_mod
 from src.assembly.assembler import assemble
 
 
+def _one(path, offset=250):
+    """A single audio insert at `offset` ms — the common /trigger shape."""
+    return [(path, offset)]
+
+
 async def test_ffmpeg_timeout_raises_and_cleans_up_temp_file(tmp_path, monkeypatch):
     monkeypatch.setattr(asm_mod, "_TIMEOUT", 0.05)
     monkeypatch.setattr(asm_mod, "_OUTPUT_DIR", tmp_path)
@@ -24,7 +29,7 @@ async def test_ffmpeg_timeout_raises_and_cleans_up_temp_file(tmp_path, monkeypat
 
     with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=slow_proc)):
         with pytest.raises(asyncio.TimeoutError):
-            await assemble(tmp_path / "base.mp4", tmp_path / "audio.mp3", "trig-1")
+            await assemble(tmp_path / "base.mp4", _one(tmp_path / "audio.mp3"), "trig-1")
 
     assert list(tmp_path.glob("*.mp4")) == []
 
@@ -45,7 +50,7 @@ async def test_ffmpeg_success_returns_named_output(tmp_path, monkeypatch):
         return proc
 
     with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
-        result = await assemble(tmp_path / "base.mp4", tmp_path / "audio.mp3", "trig-2")
+        result = await assemble(tmp_path / "base.mp4", _one(tmp_path / "audio.mp3"), "trig-2")
 
     assert result == tmp_path / "trig-2.mp4"
     assert result.exists()
@@ -66,7 +71,7 @@ async def test_ffmpeg_nonzero_exit_raises_and_cleans_up(tmp_path, monkeypatch):
 
     with patch("asyncio.create_subprocess_exec", side_effect=fail_exec):
         with pytest.raises(RuntimeError, match="ffmpeg exited 1"):
-            await assemble(tmp_path / "base.mp4", tmp_path / "audio.mp3", "trig-3")
+            await assemble(tmp_path / "base.mp4", _one(tmp_path / "audio.mp3"), "trig-3")
 
     assert list(tmp_path.glob("*.mp4")) == []
 
@@ -92,26 +97,55 @@ def _filter_complex(args):
     return args[args.index("-filter_complex") + 1]
 
 
-async def test_inserted_audio_delayed_past_first_250ms_default(tmp_path, monkeypatch):
+async def test_single_insert_delayed_past_first_250ms(tmp_path, monkeypatch):
     monkeypatch.setattr(asm_mod, "_OUTPUT_DIR", tmp_path)
     captured = {}
     with patch("asyncio.create_subprocess_exec", side_effect=_capture_exec(captured)):
-        await assemble(tmp_path / "base.mp4", tmp_path / "audio.mp3", "trig-delay")
+        await assemble(tmp_path / "base.mp4", _one(tmp_path / "audio.mp3"), "trig-delay")
 
     # Input 1 is the inserted name/speech; it must not sound in the first 250ms.
-    assert "[1:a]adelay=250|250" in _filter_complex(captured["args"])
+    fc = _filter_complex(captured["args"])
+    assert "[1:a]adelay=250|250[a1]" in fc
+    assert "[0:a][a1]amix=inputs=2:duration=first[a]" in fc
 
 
-async def test_inserted_audio_delayed_past_first_250ms_with_overlay(tmp_path, monkeypatch):
+async def test_multiple_inserts_each_delayed_to_its_own_mark(tmp_path, monkeypatch):
+    monkeypatch.setattr(asm_mod, "_OUTPUT_DIR", tmp_path)
+    captured = {}
+    inserts = [(tmp_path / "name.aiff", 250), (tmp_path / "promo.aiff", 1500)]
+    with patch("asyncio.create_subprocess_exec", side_effect=_capture_exec(captured)):
+        await assemble(tmp_path / "base.mp4", inserts, "trig-multi")
+
+    args = captured["args"]
+    fc = _filter_complex(args)
+    assert "[1:a]adelay=250|250[a1]" in fc
+    assert "[2:a]adelay=1500|1500[a2]" in fc
+    assert "[0:a][a1][a2]amix=inputs=3:duration=first[a]" in fc
+    # both inserts are passed to ffmpeg as inputs
+    assert str(tmp_path / "name.aiff") in args
+    assert str(tmp_path / "promo.aiff") in args
+
+
+async def test_offset_below_floor_is_clamped_to_250(tmp_path, monkeypatch):
+    monkeypatch.setattr(asm_mod, "_OUTPUT_DIR", tmp_path)
+    captured = {}
+    with patch("asyncio.create_subprocess_exec", side_effect=_capture_exec(captured)):
+        await assemble(tmp_path / "base.mp4", _one(tmp_path / "audio.mp3", offset=100), "trig-clamp")
+
+    # 100ms is below the 250ms floor, so it is raised to 250.
+    assert "[1:a]adelay=250|250[a1]" in _filter_complex(captured["args"])
+
+
+async def test_overlay_text_still_drawn_alongside_audio(tmp_path, monkeypatch):
     monkeypatch.setattr(asm_mod, "_OUTPUT_DIR", tmp_path)
     captured = {}
     with patch("asyncio.create_subprocess_exec", side_effect=_capture_exec(captured)):
         await assemble(
-            tmp_path / "base.mp4", tmp_path / "audio.mp3", "trig-overlay", overlay_text="Jordan"
+            tmp_path / "base.mp4", _one(tmp_path / "audio.mp3"), "trig-overlay", overlay_text="Jordan"
         )
 
     fc = _filter_complex(captured["args"])
-    assert "[1:a]adelay=250|250" in fc
+    assert "[1:a]adelay=250|250[a1]" in fc
     assert "drawtext" in fc  # overlay text still applied alongside the delay
 
 
@@ -136,10 +170,10 @@ async def test_semaphore_serializes_concurrent_calls(tmp_path, monkeypatch):
 
     with patch("asyncio.create_subprocess_exec", side_effect=ordered_proc):
         t1 = asyncio.create_task(
-            assemble(tmp_path / "base.mp4", tmp_path / "audio.mp3", "t1")
+            assemble(tmp_path / "base.mp4", _one(tmp_path / "audio.mp3"), "t1")
         )
         t2 = asyncio.create_task(
-            assemble(tmp_path / "base.mp4", tmp_path / "audio.mp3", "t2")
+            assemble(tmp_path / "base.mp4", _one(tmp_path / "audio.mp3"), "t2")
         )
         await asyncio.gather(t1, t2)
 
