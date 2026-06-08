@@ -1,8 +1,29 @@
 import logging
+from pathlib import Path
 
 import pytest
 
 import src.cli as cli
+
+
+def test_default_assets_dir_points_to_existing_kiosk_pool():
+    # Base videos are sourced from the kiosk rotation pool (mras-ops/assets).
+    d = cli.default_assets_dir()
+    assert d.name == "assets" and d.parent.name == "mras-ops"
+
+
+def test_default_output_dir_is_local_and_not_the_kiosk_pool():
+    out = cli.DEFAULT_OUTPUT_DIR
+    assert "mras-ops" not in str(out)              # never the rotating pool
+    assert str(out).startswith(str(Path.home()))   # local device, easy to find
+
+
+def test_resolve_output_path_defaults_into_output_dir():
+    assert cli.resolve_output_path(None, "/x/clips", "cli-1") == Path("/x/clips/cli-1.mp4")
+
+
+def test_resolve_output_path_explicit_out_wins():
+    assert cli.resolve_output_path("/y/z.mp4", "/x/clips", "cli-1") == Path("/y/z.mp4")
 
 
 def test_parser_collects_multiple_say_and_draw():
