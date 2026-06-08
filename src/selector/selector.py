@@ -5,6 +5,7 @@ from typing import Literal
 
 _STANDARD_VIDEO = Path(os.getenv("STANDARD_VIDEO_PATH", "/assets/standard.mp4"))
 _TTS_TEMPLATE = os.getenv("TTS_TEMPLATE", "Welcome, {name}!")
+_OVERLAY_TEMPLATE = os.getenv("OVERLAY_TEMPLATE", "{name}")
 
 
 @dataclass
@@ -13,6 +14,8 @@ class AdSelection:
     base_video: Path
     tts_text: str | None = None
     person_uuid: str | None = None
+    # On-screen animated text for the live overlay (None for standard ads).
+    overlay_text: str | None = None
 
 
 async def select(trigger: dict, db) -> AdSelection:
@@ -34,4 +37,5 @@ async def select(trigger: dict, db) -> AdSelection:
         base_video=_STANDARD_VIDEO,
         tts_text=tts_text,
         person_uuid=person_uuid,
+        overlay_text=_OVERLAY_TEMPLATE.format(name=row["name"]),
     )

@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import tempfile
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,6 +15,8 @@ from pydantic import BaseModel
 
 from src.assembly.assembler import _INSERT_MIN_OFFSET_MS, assemble
 from src.db import create_pool
+from src.overlay.http_renderer import build_overlay_inserts_http
+from src.overlay.spec import default_overlay_spec
 from src.selector.selector import select
 from src.tts.gateway import synthesize
 
@@ -25,6 +28,7 @@ _OUTPUT_DIR = Path(os.getenv("ASSEMBLED_OUTPUT_DIR", "/tmp/assembled"))
 _VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "")
 _HOST = os.getenv("HOST", "localhost")
 _PORT = int(os.getenv("PORT", "8002"))
+_OVERLAY_SIDECAR_URL = os.getenv("OVERLAY_SIDECAR_URL", "http://mras-overlays:3000")
 
 
 def build_playlist(assets_dir: Path, base_url: str) -> list[str]:
@@ -114,9 +118,23 @@ async def trigger_endpoint(body: TriggerPayload):
 
     await _log(app.state.db, body.trigger_id, "tts_attempt", "success", {})
 
+    overlay_inserts = None
+    if selection.overlay_text:
+        try:
+            spec = default_overlay_spec(selection.overlay_text)
+            work = Path(tempfile.mkdtemp(prefix="overlay_", dir=_OUTPUT_DIR))
+            overlay_inserts = await build_overlay_inserts_http(
+                [spec], selection.base_video, work, app.state.http, _OVERLAY_SIDECAR_URL
+            )
+        except Exception as exc:
+            # Never drop the ad on overlay failure — ship it without the on-screen text.
+            await _log(app.state.db, body.trigger_id, "overlay", "error", {"error": str(exc)})
+            overlay_inserts = None
+
     try:
         video_path = await assemble(
-            selection.base_video, [(audio_path, _INSERT_MIN_OFFSET_MS)], body.trigger_id
+            selection.base_video, [(audio_path, _INSERT_MIN_OFFSET_MS)], body.trigger_id,
+            overlay_inserts=overlay_inserts,
         )
     except Exception as exc:
         await _log(app.state.db, body.trigger_id, "assembly", "error", {"error": str(exc)})
