@@ -21,6 +21,23 @@ def _sem() -> asyncio.Semaphore:
     return _SEMAPHORE
 
 
+def _video_filter(overlay_inserts: list[tuple[Path, int, int]], start_index: int):
+    """Composite each transparent overlay over the base, shifted to its start (`setpts`) and gated
+    to its window (`enable=between`). `eof_action=pass` keeps the base visible after the overlay's
+    frames end. Returns (filter_string, final_video_label). `start_index` = ffmpeg input index of
+    the first overlay clip (base=0, audio inserts=1..N, overlays=N+1..)."""
+    parts: list[str] = []
+    prev = "[0:v]"
+    for i, (_, start_ms, end_ms) in enumerate(overlay_inserts):
+        idx = start_index + i
+        s = f"{start_ms / 1000:g}"
+        e = f"{end_ms / 1000:g}"
+        parts.append(f"[{idx}:v]setpts=PTS+{s}/TB[ov{i}]")
+        parts.append(f"{prev}[ov{i}]overlay=0:0:eof_action=pass:enable='between(t,{s},{e})'[v{i}]")
+        prev = f"[v{i}]"
+    return ";".join(parts), prev
+
+
 def _audio_filter(offsets: list[int]) -> str:
     """Build the ffmpeg audio graph: each inserted track (inputs 1..N) is delayed by
     its mark (floored at _INSERT_MIN_OFFSET_MS) and mixed over the base audio (input 0)."""
@@ -39,6 +56,7 @@ async def assemble(
     audio_inserts: list[tuple[Path, int]],
     trigger_id: str,
     overlay_text: Optional[str] = None,
+    overlay_inserts: Optional[list[tuple[Path, int, int]]] = None,
 ) -> Path:
     _OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     out = _OUTPUT_DIR / f"{trigger_id}.mp4"
@@ -51,7 +69,11 @@ async def assemble(
             tmp = Path(tempfile.mktemp(suffix=".mp4", dir=_OUTPUT_DIR))
 
             audio_fc = _audio_filter([off for _, off in audio_inserts])
-            if overlay_text:
+            if overlay_inserts:
+                video_fc, vlabel = _video_filter(overlay_inserts, start_index=1 + len(audio_inserts))
+                filter_complex = f"{video_fc};{audio_fc}"
+                extra_args = ["-filter_complex", filter_complex, "-map", vlabel, "-map", "[a]"]
+            elif overlay_text:
                 # Write text to a temp file to avoid shell-escaping issues with names
                 tf = tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False)
                 tf.write(overlay_text)
@@ -70,6 +92,8 @@ async def assemble(
 
             inputs: list[str] = ["-i", str(base_video)]
             for path, _ in audio_inserts:
+                inputs += ["-i", str(path)]
+            for path, _, _ in (overlay_inserts or []):
                 inputs += ["-i", str(path)]
 
             proc = await asyncio.create_subprocess_exec(
