@@ -7,6 +7,10 @@ from typing import Optional
 _TIMEOUT = int(os.getenv("FFMPEG_TIMEOUT", "10"))
 _OUTPUT_DIR = Path(os.getenv("ASSEMBLED_OUTPUT_DIR", "/tmp/assembled"))
 _FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+# Hold the inserted name/speech off the first _INSERT_MIN_OFFSET_MS so it never lands
+# inside the kiosk's opening audio crossfade (where it would be muted). Clients are also
+# coached to keep the name out of the first 250ms; this is the code-level safety net.
+_INSERT_MIN_OFFSET_MS = 250
 _SEMAPHORE: Optional[asyncio.Semaphore] = None
 
 
@@ -44,11 +48,16 @@ async def assemble(
                     f"fontfile={_FONT}:"
                     f"textfile={text_file}:"
                     f"fontsize=12:x=20:y=h-30:fontcolor=white[v];"
-                    f"[0:a][1:a]amix=inputs=2:duration=first[a]"
+                    f"[1:a]adelay={_INSERT_MIN_OFFSET_MS}|{_INSERT_MIN_OFFSET_MS}[a1];"
+                    f"[0:a][a1]amix=inputs=2:duration=first[a]"
                 )
                 extra_args = ["-filter_complex", filter_complex, "-map", "[v]", "-map", "[a]"]
             else:
-                extra_args = ["-filter_complex", "amix=inputs=2:duration=first"]
+                filter_complex = (
+                    f"[1:a]adelay={_INSERT_MIN_OFFSET_MS}|{_INSERT_MIN_OFFSET_MS}[a1];"
+                    f"[0:a][a1]amix=inputs=2:duration=first[a]"
+                )
+                extra_args = ["-filter_complex", filter_complex, "-map", "0:v", "-map", "[a]"]
 
             proc = await asyncio.create_subprocess_exec(
                 "ffmpeg", "-y",
