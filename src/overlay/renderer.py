@@ -41,7 +41,8 @@ def render_overlay(spec, base_meta, work_dir, runner=subprocess.run, overlays_di
     runner(
         [
             "npx", "remotion", "render", "src/index.ts", "Overlay", str(out),
-            f"--props={props_file}", "--codec=prores", "--prores-profile=4444", "--log=error",
+            f"--props={props_file}", "--codec=prores", "--prores-profile=4444",
+            "--pixel-format=yuva444p10le", "--log=error",
         ],
         cwd=str(overlays_dir), check=True, timeout=_RENDER_TIMEOUT,
     )
