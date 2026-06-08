@@ -2,15 +2,14 @@
 
 Pass one or more spoken lines (each with a millisecond mark) and an optional
 base video; the spoken audio is synthesized locally (macOS `say`) and mixed in
-at its mark via the assembler. drawText directives are accepted and logged but
-not yet rendered into the video.
+at its mark via the assembler. Animated text overlays are rendered with Remotion
+(`--overlay` JSON, or the `--draw` shorthand) and composited onto the video.
 
 Example:
     python -m src.cli \
         --say 250 "Hello, Jason" \
-        --say 1500 "Buy the new Nike smurph shoes" \
-        --draw 500 "LIMITED TIME" \
-        --assets ./assets --out /tmp/out.mp4
+        --overlay '{"text":"LIMITED TIME","startMs":500,"durationMs":2000,"preset":"turbulence-warp"}' \
+        --open
 """
 import argparse
 import asyncio
@@ -23,6 +22,9 @@ import time
 from pathlib import Path
 
 from src.assembly.assembler import assemble
+from src.overlay.probe import probe_video
+from src.overlay.renderer import render_overlay
+from src.overlay.spec import parse_overlay_specs
 
 logger = logging.getLogger("mras-composer.cli")
 
@@ -44,7 +46,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--draw", nargs=2, action="append", metavar=("MS", "TEXT"),
-        help="On-screen text at MS milliseconds. Repeatable. Logged only (not yet rendered).",
+        help="Shorthand for a default fade text overlay at MS milliseconds. Repeatable.",
+    )
+    p.add_argument(
+        "--overlay", action="append", metavar="JSON",
+        help='Animated text overlay as JSON, e.g. \'{"text":"SALE","startMs":500,'
+             '"durationMs":2000,"preset":"turbulence-warp"}\'. Repeatable.',
     )
     p.add_argument("--video", help="Base video file. Overrides --assets.")
     p.add_argument(
@@ -98,32 +105,38 @@ def build_audio_inserts(say_items, out_dir, synth=synth_say) -> list[tuple[Path,
     return [(synth(text, out_dir), ms) for ms, text in say_items]
 
 
-def log_draw_directives(items) -> None:
-    for ms, text in items:
-        logger.info(
-            "drawText directive read from CLI (rendering not yet implemented): %dms %r", ms, text
-        )
+def build_overlay_inserts(specs, base, work, probe=None, render=None):
+    """Render each overlay spec to a transparent clip and pair it with its (start, end) window,
+    clamped to the base video's duration."""
+    probe = probe or probe_video
+    render = render or render_overlay
+    meta = probe(base)
+    inserts = []
+    for spec in specs:
+        clip = render(spec, meta, work)
+        inserts.append((clip, spec.start_ms, min(spec.end_ms, meta.duration_ms)))
+    return inserts
 
 
 async def run(argv=None) -> Path:
     args = build_parser().parse_args(argv)
     say_items = parse_items(args.say or [])
-    draw_items = parse_items(args.draw or [])
     if not say_items:
         raise SystemExit("provide at least one --say MS TEXT")
+    specs = parse_overlay_specs(args.overlay, args.draw)
 
     base = resolve_base_video(args.video, args.assets)
     logger.info("base video: %s", base)
 
     work = Path(tempfile.mkdtemp(prefix="mras_cli_"))
     inserts = build_audio_inserts(say_items, work)
-    log_draw_directives(draw_items)
+    overlay_inserts = build_overlay_inserts(specs, base, work) if specs else None
 
     trigger_id = args.trigger_id or f"cli-{int(time.time())}"
     out_path = resolve_output_path(args.out, args.out_dir, trigger_id)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    produced = await assemble(base, inserts, trigger_id)
+    produced = await assemble(base, inserts, trigger_id, overlay_inserts=overlay_inserts)
     shutil.move(str(produced), out_path)
     logger.info("assembled: %s", out_path)
     if args.open:
