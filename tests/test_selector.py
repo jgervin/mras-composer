@@ -61,3 +61,18 @@ async def test_tts_text_uses_person_name():
          patch("src.selector.selector._TTS_TEMPLATE", "Hey {name}, welcome!"):
         result = await select({"uuid": "uuid-xyz", "is_new_visitor": False}, db)
     assert result.tts_text == "Hey Jason, welcome!"
+
+
+async def test_personalized_selection_sets_overlay_text_from_name():
+    db = _db(name="Jason")
+    with patch("src.selector.selector._STANDARD_VIDEO", _FAKE_VIDEO), \
+         patch("src.selector.selector._OVERLAY_TEMPLATE", "{name}"):
+        result = await select({"uuid": "uuid-xyz", "is_new_visitor": False}, db)
+    assert result.overlay_text == "Jason"
+
+
+async def test_standard_selection_has_no_overlay_text():
+    db = _db()
+    with patch("src.selector.selector._STANDARD_VIDEO", _FAKE_VIDEO):
+        result = await select({"uuid": None, "is_new_visitor": True}, db)
+    assert result.overlay_text is None
