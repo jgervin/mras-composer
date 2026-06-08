@@ -1,4 +1,3 @@
-import logging
 from pathlib import Path
 
 import pytest
@@ -87,12 +86,6 @@ def test_build_audio_inserts_preserves_marks(tmp_path):
     assert calls == ["Hello", "Buy Nike"]
 
 
-def test_draw_directives_are_logged_not_rendered(caplog):
-    with caplog.at_level(logging.INFO, logger="mras-composer.cli"):
-        cli.log_draw_directives([(500, "LIMITED TIME"), (2000, "Act now")])
-    text = caplog.text
-    assert "LIMITED TIME" in text
-    assert "Act now" in text
-    assert "500" in text and "2000" in text
-    # explicitly flagged as read-but-not-rendered
-    assert "not" in text.lower() and "render" in text.lower()
+def test_overlay_flag_collected(tmp_path):
+    args = cli.build_parser().parse_args(["--overlay", '{"text":"X","startMs":0}'])
+    assert args.overlay == ['{"text":"X","startMs":0}']
