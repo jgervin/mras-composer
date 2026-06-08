@@ -51,6 +51,25 @@ async def test_single_overlay_composited_with_timing(tmp_path, monkeypatch):
     assert "libx264" in args     # output still h264
 
 
+async def test_two_overlays_chain_and_index_correctly(tmp_path, monkeypatch):
+    monkeypatch.setattr(asm_mod, "_OUTPUT_DIR", tmp_path)
+    captured = {}
+    ov1, ov2 = tmp_path / "a.mov", tmp_path / "b.mov"
+    with patch("asyncio.create_subprocess_exec", side_effect=_capture_exec(captured)):
+        await assemble(tmp_path / "base.mp4", [(tmp_path / "au.mp3", 250)], "t-multi",
+                       overlay_inserts=[(ov1, 500, 2500), (ov2, 3000, 5000)])
+
+    args = captured["args"]
+    fc = _fc(args)
+    # base=0, audio=1, overlays=2 and 3; overlays chain [v0] -> [v1]
+    assert "[2:v]setpts=PTS+0.5/TB[ov0]" in fc
+    assert "[0:v][ov0]overlay=0:0:eof_action=pass:enable='between(t,0.5,2.5)'[v0]" in fc
+    assert "[3:v]setpts=PTS+3/TB[ov1]" in fc
+    assert "[v0][ov1]overlay=0:0:eof_action=pass:enable='between(t,3,5)'[v1]" in fc
+    assert _maps(args) == ["[v1]", "[a]"]
+    assert str(ov1) in args and str(ov2) in args
+
+
 async def test_overlay_inserts_take_precedence_over_overlay_text(tmp_path, monkeypatch):
     monkeypatch.setattr(asm_mod, "_OUTPUT_DIR", tmp_path)
     captured = {}
