@@ -61,6 +61,29 @@ def _stop(mocks):
         p.stop()
 
 
+def test_preview_bad_component_id_is_graceful_not_500():
+    # A non-UUID component_id makes the DB lookup raise (asyncpg DataError in prod).
+    # /preview must catch it and return JSON {"error": ...} with 200 — NOT an unhandled
+    # 500, which carries no CORS header and shows as "Failed to fetch" in the browser.
+    db = AsyncMock()
+    db.fetchrow = AsyncMock(side_effect=Exception("invalid UUID 'comp-fallingsnow'"))
+    db.execute = AsyncMock()
+    db.close = AsyncMock()
+    p = patch("main.create_pool", AsyncMock(return_value=db))
+    p.start()
+    try:
+        client = TestClient(main.app, raise_server_exceptions=False)
+        with client:
+            res = client.post(
+                "/preview",
+                json={"component_id": "comp-fallingsnow", "props": {}, "base_video": "/assets/standard.mp4"},
+            )
+        assert res.status_code == 200, f"expected graceful 200, got {res.status_code}"
+        assert "error" in res.json()
+    finally:
+        p.stop()
+
+
 def test_preview_renders_and_composites():
     client, mocks = _preview_client()
     try:
