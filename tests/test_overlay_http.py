@@ -35,8 +35,9 @@ async def test_render_overlay_http_posts_props_and_saves_bytes(tmp_path):
 
     out = await render_overlay_http(spec, base, tmp_path, client, "http://sidecar:3000")
 
-    # Posts the exact props contract the sidecar/Remotion expects, to the /render endpoint.
-    assert client.calls == [("http://sidecar:3000/render", _props(spec, base))]
+    # After the compositionId refactor render_overlay_http delegates to render_composition_http,
+    # so the wire payload is wrapped: {compositionId: "Overlay", props: <flat-props>}.
+    assert client.calls == [("http://sidecar:3000/render", {"compositionId": "Overlay", "props": _props(spec, base)})]
     assert out.suffix == ".mov"
     assert out.read_bytes() == b"FAKE-MOV-BYTES"
 
