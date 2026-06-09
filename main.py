@@ -16,7 +16,7 @@ from pydantic import BaseModel
 
 from src.assembly.assembler import _INSERT_MIN_OFFSET_MS, assemble
 from src.db import create_pool
-from src.overlay.conformance import ConformanceError, assert_conformant
+from src.overlay.conformance import assert_conformant
 from src.overlay.http_renderer import build_overlay_inserts_http, render_composition_http
 from src.overlay.probe import probe_video
 from src.overlay.spec import default_overlay_spec
@@ -155,7 +155,7 @@ async def trigger_endpoint(body: TriggerPayload):
 
 
 class PreviewPayload(BaseModel):
-    component_id: int
+    component_id: str
     props: dict
     base_video: str
 
@@ -168,31 +168,31 @@ async def preview_endpoint(body: PreviewPayload):
     if row is None:
         return {"error": "unknown component"}
 
-    meta = probe_video(Path(body.base_video))
-    props = {
-        **body.props,
-        "baseWidth": meta.width,
-        "baseHeight": meta.height,
-        "fps": meta.fps,
-        "durationMs": int(body.props.get("durationMs", 2000)),
-    }
-    work = Path(tempfile.mkdtemp(prefix="preview_", dir=_OUTPUT_DIR))
     try:
+        meta = probe_video(Path(body.base_video))
+        props = {
+            **body.props,
+            "baseWidth": meta.width,
+            "baseHeight": meta.height,
+            "fps": meta.fps,
+            "durationMs": int(body.props.get("durationMs", 2000)),
+        }
+        work = Path(tempfile.mkdtemp(prefix="preview_", dir=_OUTPUT_DIR))
         clip = await render_composition_http(
             app.state.http, _OVERLAY_SIDECAR_URL, f"comp-{row['slug']}", props, work
         )
         assert_conformant(clip, meta)
+        start_ms = int(props.get("startMs", 0))
+        inserts = [(clip, start_ms, min(start_ms + props["durationMs"], meta.duration_ms))]
+        out = await assemble(
+            Path(body.base_video),
+            [],
+            f"preview-{int(time.time())}",
+            overlay_inserts=inserts,
+        )
     except Exception as exc:
         return {"error": str(exc)}
 
-    start_ms = int(props.get("startMs", 0))
-    inserts = [(clip, start_ms, min(start_ms + props["durationMs"], meta.duration_ms))]
-    out = await assemble(
-        Path(body.base_video),
-        [],
-        f"preview-{int(time.time())}",
-        overlay_inserts=inserts,
-    )
     return {"url": f"http://{_HOST}:{_PORT}/media/{out.name}"}
 
 

@@ -68,7 +68,7 @@ def test_preview_renders_and_composites():
             res = client.post(
                 "/preview",
                 json={
-                    "component_id": 1,
+                    "component_id": "a1b2c3d4-0000-0000-0000-000000000001",
                     "props": {"durationMs": 2000},
                     "base_video": "/assets/standard.mp4",
                 },
@@ -81,6 +81,12 @@ def test_preview_renders_and_composites():
         )
         # render was called exactly once (composition rendered via sidecar)
         mocks["render"].assert_awaited_once()
+        # render was called with a composition id of the form comp-<slug>
+        render_args, _ = mocks["render"].call_args
+        comp_id = render_args[2]
+        assert comp_id.startswith("comp-"), (
+            f"expected composition id to start with 'comp-', got {comp_id!r}"
+        )
         # assemble was called with overlay_inserts (not None)
         mocks["assemble"].assert_awaited_once()
         _, kwargs = mocks["assemble"].call_args
@@ -98,7 +104,7 @@ def test_preview_unknown_component_returns_error():
             res = client.post(
                 "/preview",
                 json={
-                    "component_id": 999,
+                    "component_id": "a1b2c3d4-0000-0000-0000-000000000099",
                     "props": {},
                     "base_video": "/assets/standard.mp4",
                 },
@@ -107,6 +113,27 @@ def test_preview_unknown_component_returns_error():
         body = res.json()
         assert "error" in body, f"expected 'error' key in {body}"
         mocks["render"].assert_not_called()
+        mocks["assemble"].assert_not_called()
+    finally:
+        _stop(mocks)
+
+
+def test_preview_conformance_failure_returns_error():
+    client, mocks = _preview_client()
+    mocks["conformant"].side_effect = ValueError("bad dimensions")
+    try:
+        with client:
+            res = client.post(
+                "/preview",
+                json={
+                    "component_id": "a1b2c3d4-0000-0000-0000-000000000001",
+                    "props": {"durationMs": 2000},
+                    "base_video": "/assets/standard.mp4",
+                },
+            )
+        assert res.status_code == 200
+        body = res.json()
+        assert "error" in body, f"expected 'error' key in {body}"
         mocks["assemble"].assert_not_called()
     finally:
         _stop(mocks)
