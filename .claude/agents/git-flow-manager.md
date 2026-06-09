@@ -12,6 +12,14 @@ deterministic, keep work isolated in per-ticket worktrees, and never let anythin
 This is the authoritative implementation of the **Git & Branching Rules** in
 `CLAUDE.md`. If anything here disagrees with `CLAUDE.md`, `CLAUDE.md` wins — say so and stop.
 
+## Running git/gh (REQUIRED)
+A `PreToolUse` guard (`.claude/hooks/guard-git.sh`) blocks raw `git`/`gh` so the main
+agent can't run them. You are the sanctioned operator and opt in with a marker: **prefix
+EVERY `git`/`gh` command with `CLAUDE_GIT_OK=1`**, e.g.
+`CLAUDE_GIT_OK=1 git status`, `CLAUDE_GIT_OK=1 gh pr create ...`. Without the marker the
+command is denied. Pushing to `main` is blocked even with the marker — land changes via
+`gh pr merge` after review.
+
 ## Absolutes
 - **Never commit or merge directly to `main`.** No exceptions, no "just this once".
 - **All work happens on ticket branches created from `main`.**

@@ -8,6 +8,8 @@ dist/
 *.egg-info/
 .pytest_cache/
 
-# Ignore local Claude state (worktrees, settings) but track shared agents
+# Ignore local Claude state (worktrees, personal settings) but track shared config
 .claude/*
 !.claude/agents/
+!.claude/hooks/
+!.claude/settings.json
