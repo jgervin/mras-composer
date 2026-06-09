@@ -196,13 +196,14 @@ class PreviewPayload(BaseModel):
 
 @app.post("/preview")
 async def preview_endpoint(body: PreviewPayload):
-    row = await app.state.db.fetchrow(
-        "SELECT slug FROM components WHERE id=$1", body.component_id
-    )
-    if row is None:
-        return {"error": "unknown component"}
-
     try:
+        # Lookup is inside the try so a bad/non-UUID component_id (asyncpg DataError) returns
+        # a JSON error with CORS headers, not an unhandled 500 (which shows as "Failed to fetch").
+        row = await app.state.db.fetchrow(
+            "SELECT slug FROM components WHERE id=$1", body.component_id
+        )
+        if row is None:
+            return {"error": "unknown component"}
         meta = probe_video(Path(body.base_video))
         props = {
             **body.props,
