@@ -76,3 +76,18 @@ async def test_standard_selection_has_no_overlay_text():
     with patch("src.selector.selector._STANDARD_VIDEO", _FAKE_VIDEO):
         result = await select({"uuid": None, "is_new_visitor": True}, db)
     assert result.overlay_text is None
+
+
+async def test_identified_visitor_gets_active_custom_ad():
+    db = AsyncMock()
+    db.fetchrow = AsyncMock(side_effect=[
+        {"name": "Jason", "is_blocked": False},
+        {"base_video": "/assets/standard.mp4", "slug": "neon",
+         "default_props": {"color": "#ff2d2d"}, "personalized_field": "text"},
+    ])
+    with patch("src.selector.selector._STANDARD_VIDEO", _FAKE_VIDEO):
+        result = await select({"uuid": "uuid-abc", "is_new_visitor": False}, db)
+    assert result.type == "personalized"
+    assert result.composition_id == "comp-neon"
+    assert result.overlay_props["text"] == "Jason"
+    assert result.overlay_props["color"] == "#ff2d2d"
