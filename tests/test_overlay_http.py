@@ -69,6 +69,12 @@ async def test_build_overlay_inserts_http_renders_each_and_clamps_window(tmp_pat
     assert end_ms == 1000  # clamped to base duration
 
 
+async def test_render_composition_http_raises_on_non_200(tmp_path):
+    client = FakeClient(FakeResp(500, text="boom"))
+    with pytest.raises(RuntimeError):
+        await render_composition_http(client, "http://sidecar:3000", "comp-neon", {}, tmp_path)
+
+
 async def test_render_composition_http_posts_compositionId_and_props(tmp_path):
     client = FakeClient(FakeResp(200, content=b"MOV"))
     props = {"text": "Jason", "baseWidth": 854, "baseHeight": 480, "fps": 24, "durationMs": 600}

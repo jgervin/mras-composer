@@ -1,7 +1,8 @@
 """Output-conformance checks: a bad custom overlay component must not silently break the composite."""
+import subprocess
 import pytest
 
-from src.overlay.conformance import ConformanceError, assert_conformant
+from src.overlay.conformance import ConformanceError, _probe_dims_pixfmt, assert_conformant
 from src.overlay.probe import VideoMeta
 
 
@@ -27,3 +28,18 @@ def test_wrong_dims_raises(tmp_path):
     f.write_bytes(b"x")
     with pytest.raises(ConformanceError):
         assert_conformant(f, _meta(), probe=lambda _p: (640, 360, "yuva444p10le"))
+
+
+def test_probe_dims_pixfmt_raises_conformance_error_on_malformed_output(tmp_path):
+    """Two-field stdout (missing pix_fmt) must raise ConformanceError, not ValueError."""
+    f = tmp_path / "ov.mov"
+    f.write_bytes(b"x")
+
+    class _FakeProc:
+        stdout = "854,480\n"  # only 2 fields — missing pix_fmt
+
+    def _fake_runner(*_args, **_kwargs):
+        return _FakeProc()
+
+    with pytest.raises(ConformanceError):
+        _probe_dims_pixfmt(f, runner=_fake_runner)

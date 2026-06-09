@@ -7,8 +7,8 @@ class ConformanceError(Exception):
     pass
 
 
-def _probe_dims_pixfmt(path: Path):
-    proc = subprocess.run(
+def _probe_dims_pixfmt(path: Path, runner=subprocess.run):
+    proc = runner(
         [
             "ffprobe", "-v", "error", "-select_streams", "v:0",
             "-show_entries", "stream=width,height,pix_fmt",
@@ -16,7 +16,10 @@ def _probe_dims_pixfmt(path: Path):
         ],
         capture_output=True, text=True, check=True,
     )
-    w, h, pix = proc.stdout.strip().split(",")
+    parts = proc.stdout.strip().split(",", 2)
+    if len(parts) != 3:
+        raise ConformanceError(f"ffprobe returned unexpected output: {proc.stdout!r}")
+    w, h, pix = parts
     return int(w), int(h), pix
 
 
