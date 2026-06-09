@@ -5,7 +5,7 @@ path, where the Node-free composer image must call the sidecar over HTTP.
 """
 import pytest
 
-from src.overlay.http_renderer import build_overlay_inserts_http, render_overlay_http
+from src.overlay.http_renderer import build_overlay_inserts_http, render_composition_http, render_overlay_http
 from src.overlay.probe import VideoMeta
 from src.overlay.renderer import _props
 from src.overlay.spec import OverlaySpec
@@ -66,3 +66,11 @@ async def test_build_overlay_inserts_http_renders_each_and_clamps_window(tmp_pat
     assert clip.read_bytes() == b"MOV"
     assert start_ms == 0
     assert end_ms == 1000  # clamped to base duration
+
+
+async def test_render_composition_http_posts_compositionId_and_props(tmp_path):
+    client = FakeClient(FakeResp(200, content=b"MOV"))
+    props = {"text": "Jason", "baseWidth": 854, "baseHeight": 480, "fps": 24, "durationMs": 600}
+    out = await render_composition_http(client, "http://sidecar:3000", "comp-neon", props, tmp_path)
+    assert client.calls == [("http://sidecar:3000/render", {"compositionId": "comp-neon", "props": props})]
+    assert out.read_bytes() == b"MOV"
