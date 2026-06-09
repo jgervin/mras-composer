@@ -11,13 +11,17 @@ from src.overlay.probe import probe_video
 from src.overlay.renderer import _props
 
 
-async def render_overlay_http(spec, base_meta, work_dir, client, sidecar_url) -> Path:
-    resp = await client.post(f"{sidecar_url}/render", json=_props(spec, base_meta))
+async def render_composition_http(client, sidecar_url, composition_id, props, work_dir) -> Path:
+    resp = await client.post(f"{sidecar_url}/render", json={"compositionId": composition_id, "props": props})
     if resp.status_code != 200:
         raise RuntimeError(f"overlay sidecar returned {resp.status_code}: {resp.text}")
     out = Path(tempfile.mktemp(prefix="overlay-", suffix=".mov", dir=work_dir))
     out.write_bytes(resp.content)
     return out
+
+
+async def render_overlay_http(spec, base_meta, work_dir, client, sidecar_url) -> Path:
+    return await render_composition_http(client, sidecar_url, "Overlay", _props(spec, base_meta), work_dir)
 
 
 async def build_overlay_inserts_http(specs, base, work_dir, client, sidecar_url, probe=probe_video):
