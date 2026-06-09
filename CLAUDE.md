@@ -69,7 +69,7 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 # Git & Branching Rules (for Claude)
 
 ## Absolutes
-- **Never run raw Git operations as the "main" coding agent.** Delegate all Git work to a dedicated Git subagent/command — the main agent must not invoke `git` directly. This prevents agents from stepping on each other's branches and accidentally touching `main`.
+- **Never run raw Git operations as the "main" coding agent.** Delegate all Git work to the `git-flow-manager` subagent (`.claude/agents/git-flow-manager.md`) — the main agent must not invoke `git` directly. This prevents agents from stepping on each other's branches and accidentally touching `main`.
 - **Use one Git worktree per ticket** so each session is isolated and Git state is deterministic. Claude Code has first-class worktree support — start the ticket session with the worktree flag (`--worktree` / `-w`); do not reuse a worktree across tickets.
   - Example: starting `claude -w feat/TKT-1234-delete-ads` creates a worktree at `.claude/worktrees/feat-TKT-1234-delete-ads/`.
 - Never commit or merge directly to `main`.

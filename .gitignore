@@ -7,3 +7,7 @@ venv/
 dist/
 *.egg-info/
 .pytest_cache/
+
+# Ignore local Claude state (worktrees, settings) but track shared agents
+.claude/*
+!.claude/agents/
