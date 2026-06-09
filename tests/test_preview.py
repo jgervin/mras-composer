@@ -168,6 +168,37 @@ def test_preview_renders_and_composites():
         _stop(mocks)
 
 
+def test_preview_missing_base_video_returns_friendly_error():
+    # If the base clip can't be probed (e.g. a stale ad pointing at /assets/standard1.mp4 that
+    # doesn't exist), /preview should return a human error — not leak the raw ffprobe command —
+    # and must not attempt to render or composite.
+    import subprocess
+
+    client, mocks = _preview_client()
+    mocks["probe"].side_effect = subprocess.CalledProcessError(
+        1, ["ffprobe", "-v", "error", "/assets/standard1.mp4"]
+    )
+    try:
+        with client:
+            res = client.post(
+                "/preview",
+                json={
+                    "component_id": "a1b2c3d4-0000-0000-0000-000000000001",
+                    "props": {},
+                    "base_video": "/assets/standard1.mp4",
+                },
+            )
+        assert res.status_code == 200
+        err = res.json().get("error", "")
+        assert "/assets/standard1.mp4" in err
+        assert "not found" in err.lower() or "unreadable" in err.lower()
+        assert "ffprobe" not in err.lower()  # raw command not leaked to the user
+        mocks["render"].assert_not_called()
+        mocks["assemble"].assert_not_called()
+    finally:
+        _stop(mocks)
+
+
 def test_preview_unknown_component_returns_error():
     client, mocks = _preview_client(component_missing=True)
     try:
