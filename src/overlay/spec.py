@@ -1,5 +1,6 @@
 """Overlay directive spec: advertiser JSON (camelCase) → OverlaySpec, plus --draw back-compat."""
 import json
+import os
 from dataclasses import dataclass
 
 _DEFAULT_DURATION_MS = 2000
@@ -44,6 +45,19 @@ def _spec_from_json(raw: str) -> OverlaySpec:
         position=d.get("position", "center"),
         font_size=int(d.get("fontSize", 96)),
         font_family=d.get("fontFamily", "Inter"),
+    )
+
+
+def default_overlay_spec(text: str) -> OverlaySpec:
+    """The single overlay the live /trigger path renders for a personalized ad — the viewer's name,
+    styled via OVERLAY_* env (sensible defaults: turbulence-warp, top, 0.5s–2.5s)."""
+    return OverlaySpec(
+        text=text,
+        start_ms=int(os.getenv("OVERLAY_START_MS", "500")),
+        duration_ms=int(os.getenv("OVERLAY_DURATION_MS", "2000")),
+        preset=os.getenv("OVERLAY_PRESET", "turbulence-warp"),
+        color=os.getenv("OVERLAY_COLOR", "#ffffff"),
+        position=os.getenv("OVERLAY_POSITION", "top"),
     )
 
 

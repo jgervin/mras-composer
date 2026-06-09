@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from src.overlay.spec import OverlaySpec, parse_overlay_specs
+from src.overlay.spec import OverlaySpec, default_overlay_spec, parse_overlay_specs
 
 
 def test_overlay_json_parsed_to_spec():
@@ -49,3 +49,25 @@ def test_negative_start_raises():
 def test_invalid_json_raises():
     with pytest.raises(ValueError):
         parse_overlay_specs(["{not json"], None)
+
+
+def test_default_overlay_spec_uses_turbulence_warp_defaults(monkeypatch):
+    for var in ("OVERLAY_START_MS", "OVERLAY_DURATION_MS", "OVERLAY_PRESET",
+                "OVERLAY_COLOR", "OVERLAY_POSITION"):
+        monkeypatch.delenv(var, raising=False)
+    spec = default_overlay_spec("Jason")
+    assert spec.text == "Jason"
+    assert spec.preset == "turbulence-warp"
+    assert spec.start_ms == 500 and spec.duration_ms == 2000
+    assert spec.position == "top"
+
+
+def test_default_overlay_spec_honors_env(monkeypatch):
+    monkeypatch.setenv("OVERLAY_PRESET", "fade")
+    monkeypatch.setenv("OVERLAY_START_MS", "1000")
+    monkeypatch.setenv("OVERLAY_DURATION_MS", "1500")
+    monkeypatch.setenv("OVERLAY_COLOR", "#00ff00")
+    monkeypatch.setenv("OVERLAY_POSITION", "bottom")
+    spec = default_overlay_spec("Alice")
+    assert spec.preset == "fade" and spec.start_ms == 1000 and spec.duration_ms == 1500
+    assert spec.color == "#00ff00" and spec.position == "bottom"
