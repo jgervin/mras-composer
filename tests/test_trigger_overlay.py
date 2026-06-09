@@ -120,6 +120,21 @@ def test_trigger_custom_component_ad_calls_build_custom_overlay_inserts():
         _stop(mocks)
 
 
+def test_custom_overlay_sidecar_failure_falls_back_to_no_overlay():
+    sel = AdSelection(type="personalized", base_video=Path("/assets/standard.mp4"),
+                      tts_text="Welcome, Jason!", person_uuid="u1",
+                      composition_id="comp-neon", overlay_props={"text": "Jason"})
+    client, mocks = _client_with_custom(sel, overlay_raises=True)
+    try:
+        with client:
+            res = client.post("/trigger", json={"trigger_id": "t1", "uuid": "u1", "is_new_visitor": False})
+        assert res.json()["status"] == "ok"
+        _, kwargs = mocks["assemble"].call_args
+        assert kwargs.get("overlay_inserts") is None
+    finally:
+        _stop(mocks)
+
+
 def test_overlay_sidecar_failure_falls_back_to_no_overlay():
     sel = AdSelection(type="personalized", base_video=Path("/assets/standard.mp4"),
                       tts_text="Welcome, Jason!", person_uuid="u1", overlay_text="Jason")

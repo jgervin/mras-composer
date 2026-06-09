@@ -1,3 +1,4 @@
+import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -42,9 +43,8 @@ async def select(trigger: dict, db) -> AdSelection:
         "WHERE a.is_active = true AND c.status = 'ready' ORDER BY a.created_at DESC LIMIT 1"
     )
     if ad is not None:
-        import json as _json
         raw = ad["default_props"]
-        props = dict(_json.loads(raw) if isinstance(raw, str) else (raw or {}))
+        props = dict(json.loads(raw) if isinstance(raw, str) else (raw or {}))
         props[ad["personalized_field"]] = row["name"]
         return AdSelection(
             type="personalized",
