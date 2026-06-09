@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import tempfile
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,7 +16,9 @@ from pydantic import BaseModel
 
 from src.assembly.assembler import _INSERT_MIN_OFFSET_MS, assemble
 from src.db import create_pool
-from src.overlay.http_renderer import build_overlay_inserts_http
+from src.overlay.conformance import assert_conformant
+from src.overlay.http_renderer import build_overlay_inserts_http, render_composition_http
+from src.overlay.probe import probe_video
 from src.overlay.spec import default_overlay_spec
 from src.selector.selector import select
 from src.tts.gateway import synthesize
@@ -59,6 +62,29 @@ class WSManager:
             except Exception:
                 dead.add(ws)
         self._clients -= dead
+
+
+async def build_custom_overlay_inserts(
+    client, sidecar_url, composition_id, props, base, work, probe=probe_video
+):
+    """Render a custom Remotion composition via the HTTP sidecar and return overlay inserts.
+
+    Probes the base clip to inject canvas dims/fps, renders via sidecar, asserts conformance,
+    and returns a single insert tuple clamped to the base duration.
+    """
+    meta = probe(base)
+    enriched = {
+        **props,
+        "baseWidth": meta.width,
+        "baseHeight": meta.height,
+        "fps": meta.fps,
+        "durationMs": int(props.get("durationMs", 2000)),
+    }
+    clip = await render_composition_http(client, sidecar_url, composition_id, enriched, work)
+    assert_conformant(clip, meta)
+    start_ms = int(props.get("startMs", 0))
+    duration_ms = enriched["durationMs"]
+    return [(clip, start_ms, min(start_ms + duration_ms, meta.duration_ms))]
 
 
 @asynccontextmanager
@@ -119,7 +145,18 @@ async def trigger_endpoint(body: TriggerPayload):
     await _log(app.state.db, body.trigger_id, "tts_attempt", "success", {})
 
     overlay_inserts = None
-    if selection.overlay_text:
+    if selection.composition_id:
+        try:
+            work = Path(tempfile.mkdtemp(prefix="overlay_", dir=_OUTPUT_DIR))
+            overlay_inserts = await build_custom_overlay_inserts(
+                app.state.http, _OVERLAY_SIDECAR_URL, selection.composition_id,
+                selection.overlay_props, selection.base_video, work,
+            )
+        except Exception as exc:
+            # Never drop the ad on overlay failure — ship it without the on-screen overlay.
+            await _log(app.state.db, body.trigger_id, "overlay", "error", {"error": str(exc)})
+            overlay_inserts = None
+    elif selection.overlay_text:
         try:
             spec = default_overlay_spec(selection.overlay_text)
             work = Path(tempfile.mkdtemp(prefix="overlay_", dir=_OUTPUT_DIR))
@@ -149,6 +186,48 @@ async def trigger_endpoint(body: TriggerPayload):
     await _log(app.state.db, body.trigger_id, "playback", "dispatched",
                {"video": video_path.name})
     return {"status": "ok"}
+
+
+class PreviewPayload(BaseModel):
+    component_id: str
+    props: dict
+    base_video: str
+
+
+@app.post("/preview")
+async def preview_endpoint(body: PreviewPayload):
+    row = await app.state.db.fetchrow(
+        "SELECT slug FROM components WHERE id=$1", body.component_id
+    )
+    if row is None:
+        return {"error": "unknown component"}
+
+    try:
+        meta = probe_video(Path(body.base_video))
+        props = {
+            **body.props,
+            "baseWidth": meta.width,
+            "baseHeight": meta.height,
+            "fps": meta.fps,
+            "durationMs": int(body.props.get("durationMs", 2000)),
+        }
+        work = Path(tempfile.mkdtemp(prefix="preview_", dir=_OUTPUT_DIR))
+        clip = await render_composition_http(
+            app.state.http, _OVERLAY_SIDECAR_URL, f"comp-{row['slug']}", props, work
+        )
+        assert_conformant(clip, meta)
+        start_ms = int(props.get("startMs", 0))
+        inserts = [(clip, start_ms, min(start_ms + props["durationMs"], meta.duration_ms))]
+        out = await assemble(
+            Path(body.base_video),
+            [],
+            f"preview-{int(time.time())}",
+            overlay_inserts=inserts,
+        )
+    except Exception as exc:
+        return {"error": str(exc)}
+
+    return {"url": f"http://{_HOST}:{_PORT}/media/{out.name}"}
 
 
 @app.websocket("/ws")
