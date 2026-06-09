@@ -84,6 +84,29 @@ def test_preview_bad_component_id_is_graceful_not_500():
         p.stop()
 
 
+def test_preview_overlay_spans_full_base_duration_by_default():
+    # When durationMs is omitted, the preview overlay should span the whole base clip so the
+    # advertiser actually sees the effect — not a 2s flash at the start of a longer clip.
+    client, mocks = _preview_client()  # probe returns _meta(duration_ms=5000)
+    try:
+        with client:
+            res = client.post(
+                "/preview",
+                json={
+                    "component_id": "a1b2c3d4-0000-0000-0000-000000000001",
+                    "props": {},
+                    "base_video": "/assets/standard.mp4",
+                },
+            )
+        assert res.status_code == 200
+        # render_composition_http(client, url, composition_id, props, work) → props is arg index 3
+        render_args, _ = mocks["render"].call_args
+        rendered_props = render_args[3]
+        assert rendered_props["durationMs"] == 5000  # base duration, not the old 2000 default
+    finally:
+        _stop(mocks)
+
+
 def test_preview_strips_whitespace_from_base_video():
     # A stray leading/trailing space in the base path makes ffprobe fail with a cryptic error.
     # /preview must trim it before probing/compositing.
