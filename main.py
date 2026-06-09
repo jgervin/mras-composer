@@ -91,7 +91,8 @@ async def build_custom_overlay_inserts(
 async def lifespan(app: FastAPI):
     _OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     app.state.db = await create_pool()
-    app.state.http = httpx.AsyncClient()
+    # Generous timeout: spanning a full clip means the sidecar renders more frames (a few–tens of seconds).
+    app.state.http = httpx.AsyncClient(timeout=180)
     app.state.ws = WSManager()
     yield
     await app.state.http.aclose()
@@ -212,7 +213,9 @@ async def preview_endpoint(body: PreviewPayload):
             "baseWidth": meta.width,
             "baseHeight": meta.height,
             "fps": meta.fps,
-            "durationMs": int(body.props.get("durationMs", 2000)),
+            # Default the overlay to span the whole base clip so the advertiser sees the effect
+            # across the preview, not just a 2s flash at the start.
+            "durationMs": int(body.props.get("durationMs", meta.duration_ms)),
         }
         work = Path(tempfile.mkdtemp(prefix="preview_", dir=_OUTPUT_DIR))
         clip = await render_composition_http(
