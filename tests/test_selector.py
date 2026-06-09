@@ -10,9 +10,9 @@ _FAKE_VIDEO = Path("/fake/standard.mp4")
 
 def _db(name: str = "Alice", is_blocked: bool = False, found: bool = True) -> AsyncMock:
     db = AsyncMock()
-    db.fetchrow = AsyncMock(
-        return_value={"name": name, "is_blocked": is_blocked} if found else None
-    )
+    identity_row = {"name": name, "is_blocked": is_blocked} if found else None
+    # Second call is the ad query; default None → no active ad → M3 overlay_text fallback.
+    db.fetchrow = AsyncMock(side_effect=[identity_row, None])
     return db
 
 

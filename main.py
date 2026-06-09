@@ -64,6 +64,29 @@ class WSManager:
         self._clients -= dead
 
 
+async def build_custom_overlay_inserts(
+    client, sidecar_url, composition_id, props, base, work, probe=probe_video
+):
+    """Render a custom Remotion composition via the HTTP sidecar and return overlay inserts.
+
+    Probes the base clip to inject canvas dims/fps, renders via sidecar, asserts conformance,
+    and returns a single insert tuple clamped to the base duration.
+    """
+    meta = probe(base)
+    enriched = {
+        **props,
+        "baseWidth": meta.width,
+        "baseHeight": meta.height,
+        "fps": meta.fps,
+        "durationMs": int(props.get("durationMs", 2000)),
+    }
+    clip = await render_composition_http(client, sidecar_url, composition_id, enriched, work)
+    assert_conformant(clip, meta)
+    start_ms = int(props.get("startMs", 0))
+    duration_ms = enriched["durationMs"]
+    return [(clip, start_ms, min(start_ms + duration_ms, meta.duration_ms))]
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -122,7 +145,18 @@ async def trigger_endpoint(body: TriggerPayload):
     await _log(app.state.db, body.trigger_id, "tts_attempt", "success", {})
 
     overlay_inserts = None
-    if selection.overlay_text:
+    if selection.composition_id:
+        try:
+            work = Path(tempfile.mkdtemp(prefix="overlay_", dir=_OUTPUT_DIR))
+            overlay_inserts = await build_custom_overlay_inserts(
+                app.state.http, _OVERLAY_SIDECAR_URL, selection.composition_id,
+                selection.overlay_props, selection.base_video, work,
+            )
+        except Exception as exc:
+            # Never drop the ad on overlay failure — ship it without the on-screen overlay.
+            await _log(app.state.db, body.trigger_id, "overlay", "error", {"error": str(exc)})
+            overlay_inserts = None
+    elif selection.overlay_text:
         try:
             spec = default_overlay_spec(selection.overlay_text)
             work = Path(tempfile.mkdtemp(prefix="overlay_", dir=_OUTPUT_DIR))
