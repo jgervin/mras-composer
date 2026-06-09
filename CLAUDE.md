@@ -63,3 +63,55 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 ---
 
 **These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.
+
+---
+
+# Git & Branching Rules (for Claude)
+
+## Absolutes
+- **Never run raw Git operations as the "main" coding agent.** Delegate all Git work to a dedicated Git subagent/command — the main agent must not invoke `git` directly. This prevents agents from stepping on each other's branches and accidentally touching `main`.
+- **Use one Git worktree per ticket** so each session is isolated and Git state is deterministic. Claude Code has first-class worktree support — start the ticket session with the worktree flag (`--worktree` / `-w`); do not reuse a worktree across tickets.
+  - Example: starting `claude -w feat/TKT-1234-delete-ads` creates a worktree at `.claude/worktrees/feat-TKT-1234-delete-ads/`.
+- Never commit or merge directly to `main`.
+- All work happens on ticket branches created from `main`.
+- Branch naming: `{type}/{ticket}-{slug}`, where type ∈ {feat, fix, chore}.
+  - Example: `feat/TKT-1234-delete-ads`.
+
+## Ticket lifecycle (MUST follow in order)
+1. When I say: `start ticket TKT-1234 delete ads`, do:
+   - Create or use a worktree for this ticket from `main`.
+   - Create a branch `feat/TKT-1234-delete-ads` in that worktree.
+   - Ensure this session is **locked** to that worktree/branch.
+
+2. While implementing:
+   - Make **small, atomic commits** with Conventional Commit style messages.
+   - Run tests before opening a PR using the repo's test command.
+
+3. When I say: `open PR for this ticket`:
+   - Push the branch.
+   - Open a PR targeting `main`.
+   - Use a structured PR description:
+     - Summary
+     - Motivation / context
+     - Implementation details
+     - Tests
+     - Risks / rollout
+
+4. Before you ask me to merge:
+   - Perform a **self-review** on the PR.
+   - List any concerns or potential regressions.
+
+5. When I say: `finish ticket TKT-1234`:
+   - If PR is approved and checks are green:
+     - Merge the PR into `main`.
+     - Delete the remote branch.
+     - Delete the local worktree and branch.
+     - Fetch and fast-forward local `main`.
+   - If PR is not mergeable, tell me why and do not merge.
+
+## Stacked PRs / Dependencies
+- If a ticket depends on another ticket's branch:
+  - Explicitly indicate the parent branch in PR description.
+  - Do NOT merge parent PRs unless I explicitly say: `finish stack root for TKT-xxxx`.
+- When I say "merge" without specifying PR:
+  - Ask which PR number and show the base branch to avoid ambiguity.
