@@ -84,6 +84,31 @@ def test_preview_bad_component_id_is_graceful_not_500():
         p.stop()
 
 
+def test_preview_strips_whitespace_from_base_video():
+    # A stray leading/trailing space in the base path makes ffprobe fail with a cryptic error.
+    # /preview must trim it before probing/compositing.
+    client, mocks = _preview_client()
+    try:
+        with client:
+            res = client.post(
+                "/preview",
+                json={
+                    "component_id": "a1b2c3d4-0000-0000-0000-000000000001",
+                    "props": {"durationMs": 2000},
+                    "base_video": "  /assets/standard.mp4  ",
+                },
+            )
+        assert res.status_code == 200
+        # probe_video was called with the trimmed path (no surrounding whitespace)
+        probe_args, _ = mocks["probe"].call_args
+        assert str(probe_args[0]) == "/assets/standard.mp4"
+        # assemble likewise got the trimmed path
+        assemble_args, _ = mocks["assemble"].call_args
+        assert str(assemble_args[0]) == "/assets/standard.mp4"
+    finally:
+        _stop(mocks)
+
+
 def test_preview_renders_and_composites():
     client, mocks = _preview_client()
     try:

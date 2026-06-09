@@ -204,7 +204,9 @@ async def preview_endpoint(body: PreviewPayload):
         )
         if row is None:
             return {"error": "unknown component"}
-        meta = probe_video(Path(body.base_video))
+        # Trim stray whitespace so a copy-paste with a leading/trailing space doesn't make ffprobe fail.
+        base_path = Path(body.base_video.strip())
+        meta = probe_video(base_path)
         props = {
             **body.props,
             "baseWidth": meta.width,
@@ -220,7 +222,7 @@ async def preview_endpoint(body: PreviewPayload):
         start_ms = int(props.get("startMs", 0))
         inserts = [(clip, start_ms, min(start_ms + props["durationMs"], meta.duration_ms))]
         out = await assemble(
-            Path(body.base_video),
+            base_path,
             [],
             f"preview-{int(time.time())}",
             overlay_inserts=inserts,
