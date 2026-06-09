@@ -68,27 +68,35 @@ async def assemble(
         try:
             tmp = Path(tempfile.mktemp(suffix=".mp4", dir=_OUTPUT_DIR))
 
-            audio_fc = _audio_filter([off for _, off in audio_inserts])
+            if audio_inserts:
+                audio_fc: Optional[str] = _audio_filter([off for _, off in audio_inserts])
+                audio_map = "[a]"
+            else:
+                audio_fc = None
+                audio_map = "0:a?"
+
             if overlay_inserts:
                 video_fc, vlabel = _video_filter(overlay_inserts, start_index=1 + len(audio_inserts))
-                filter_complex = f"{video_fc};{audio_fc}"
-                extra_args = ["-filter_complex", filter_complex, "-map", vlabel, "-map", "[a]"]
+                filter_complex = f"{video_fc};{audio_fc}" if audio_fc else video_fc
+                extra_args = ["-filter_complex", filter_complex, "-map", vlabel, "-map", audio_map]
             elif overlay_text:
                 # Write text to a temp file to avoid shell-escaping issues with names
                 tf = tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False)
                 tf.write(overlay_text)
                 tf.close()
                 text_file = Path(tf.name)
-                filter_complex = (
+                drawtext = (
                     f"[0:v]drawtext="
                     f"fontfile={_FONT}:"
                     f"textfile={text_file}:"
-                    f"fontsize=12:x=20:y=h-30:fontcolor=white[v];"
-                    f"{audio_fc}"
+                    f"fontsize=12:x=20:y=h-30:fontcolor=white[v]"
                 )
-                extra_args = ["-filter_complex", filter_complex, "-map", "[v]", "-map", "[a]"]
-            else:
+                filter_complex = f"{drawtext};{audio_fc}" if audio_fc else drawtext
+                extra_args = ["-filter_complex", filter_complex, "-map", "[v]", "-map", audio_map]
+            elif audio_fc:
                 extra_args = ["-filter_complex", audio_fc, "-map", "0:v", "-map", "[a]"]
+            else:
+                extra_args = ["-map", "0:v", "-map", "0:a?"]
 
             inputs: list[str] = ["-i", str(base_video)]
             for path, _ in audio_inserts:
