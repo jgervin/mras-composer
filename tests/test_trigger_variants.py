@@ -132,3 +132,16 @@ def test_one_failed_variant_does_not_sink_the_others():
         assert mocks["ws"].send_to.await_count == 1  # surviving variant shipped
     finally:
         _stop(client, mocks)
+
+
+def test_standard_selection_releases_the_reserved_displays():
+    """A new visitor must not freeze the display wall: reservations made at
+    assign-time are released when no personalized ad will play."""
+    std = AdSelection(type="standard", base_video=Path("/assets/standard.mp4"))
+    client, mocks = _client([std], ["display-1", "display-2"])
+    try:
+        res = client.post("/trigger", json={"trigger_id": "t1", "is_new_visitor": True})
+        assert res.json()["status"] == "standard"
+        mocks["assigner"].release.assert_called_once_with(["display-1", "display-2"])
+    finally:
+        _stop(client, mocks)

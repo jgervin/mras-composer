@@ -199,6 +199,8 @@ async def trigger_endpoint(body: TriggerPayload):
 
     selections = await select_variants(body.model_dump(), app.state.db, len(assigned))
     if selections[0].type == "standard":
+        # Nothing personalized will play — don't hold the display wall hostage.
+        app.state.assigner.release(assigned)
         await _log(app.state.db, body.trigger_id, "composition", "standard_selected", {})
         return {"status": "standard"}
 
@@ -207,6 +209,7 @@ async def trigger_endpoint(body: TriggerPayload):
         selections[0].tts_text, selections[0].person_uuid, _VOICE_ID, app.state.http
     )
     if audio_path is None:
+        app.state.assigner.release(assigned)
         await _log(app.state.db, body.trigger_id, "tts_attempt", "error",
                    {"error": "TTS_UNAVAILABLE"})
         return {"status": "tts_failed"}
@@ -238,7 +241,10 @@ async def trigger_endpoint(body: TriggerPayload):
                    {"video": result.name, "screen_id": screen_id})
         sent += 1
 
-    return {"status": "ok", "displays": sent} if sent else {"status": "assembly_failed"}
+    if sent == 0:
+        app.state.assigner.release(assigned)
+        return {"status": "assembly_failed"}
+    return {"status": "ok", "displays": sent}
 
 
 async def _trigger_single_broadcast(body: TriggerPayload):

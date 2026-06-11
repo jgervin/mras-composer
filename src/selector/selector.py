@@ -87,6 +87,9 @@ async def select_variants(trigger: dict, db, count: int) -> list[AdSelection]:
     identity = await db.fetchrow(
         "SELECT name, is_blocked FROM identities WHERE uuid = $1", trigger["uuid"]
     )
+    if identity is None:
+        # Identity vanished between select() and here — degrade, don't 500.
+        return [base] * count
     name = identity["name"]
     tts_text = _TTS_TEMPLATE.format(name=name)
 

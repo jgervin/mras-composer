@@ -62,3 +62,23 @@ async def test_blocked_person_gets_standard():
     db = _db(_identity_row(blocked=True), [_ad_row("neon")])
     out = await select_variants(_trigger(), db, count=2)
     assert len(out) == 1 and out[0].type == "standard"
+
+
+async def test_identity_deleted_mid_flight_falls_back_instead_of_crashing():
+    """select() saw the person, but they vanish before the variants query's
+    second identity lookup — must degrade to the legacy selection, not 500."""
+    calls = {"identities": 0}
+    ads = [_ad_row("neon")]
+
+    async def fetchrow(q, *a):
+        if "identities" in q:
+            calls["identities"] += 1
+            return _identity_row() if calls["identities"] == 1 else None
+        return dict(ads[0])
+
+    db = AsyncMock()
+    db.fetchrow = AsyncMock(side_effect=fetchrow)
+    db.fetch = AsyncMock(return_value=[dict(r) for r in ads])
+
+    out = await select_variants(_trigger(), db, count=2)
+    assert len(out) == 2 and all(s.type == "personalized" for s in out)

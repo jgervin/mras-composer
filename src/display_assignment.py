@@ -28,3 +28,9 @@ class DisplayAssigner:
         for screen_id in taken:
             self._reserved_until[screen_id] = now + hold_secs
         return taken
+
+    def release(self, screen_ids: list[str]) -> None:
+        """Free reservations early — no personalized clip will play there
+        (standard selection, TTS failure, every variant failed)."""
+        for screen_id in screen_ids:
+            self._reserved_until.pop(screen_id, None)

@@ -35,3 +35,10 @@ def test_partial_availability_takes_only_free_displays():
     a.assign(SCREENS[:1], faces_in_frame=1, now=100.0, hold_secs=12)  # display-1 busy
     got = a.assign(SCREENS, faces_in_frame=2, now=101.0, hold_secs=12)
     assert "display-1" not in got and len(got) == 2
+
+
+def test_release_frees_reserved_displays_immediately():
+    a = DisplayAssigner()
+    taken = a.assign(SCREENS, faces_in_frame=1, now=100.0, hold_secs=12)
+    a.release(taken)
+    assert a.assign(SCREENS, faces_in_frame=1, now=100.5, hold_secs=12) == SCREENS
