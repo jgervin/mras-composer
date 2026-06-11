@@ -62,3 +62,45 @@ async def select(trigger: dict, db) -> AdSelection:
         person_uuid=person_uuid,
         overlay_text=_OVERLAY_TEMPLATE.format(name=row["name"]),
     )
+
+
+async def select_variants(trigger: dict, db, count: int) -> list[AdSelection]:
+    """Per-display ad selection (T-C): up to `count` DISTINCT active custom
+    ads for an identified person, cycled when fewer ads exist than displays.
+    Standard/blocked/new-visitor short-circuits to the single legacy
+    selection; zero active ads falls back to the legacy text-overlay
+    selection on every display."""
+    base = await select(trigger, db)
+    if base.type == "standard" or count <= 1:
+        return [base]
+
+    rows = await db.fetch(
+        "SELECT a.base_video, c.slug, a.default_props, a.personalized_field "
+        "FROM ads a JOIN components c ON c.id = a.component_id "
+        "WHERE a.is_active = true AND c.status = 'ready' "
+        "ORDER BY a.created_at DESC LIMIT $1",
+        count,
+    )
+    if not rows:
+        return [base] * count
+
+    identity = await db.fetchrow(
+        "SELECT name, is_blocked FROM identities WHERE uuid = $1", trigger["uuid"]
+    )
+    name = identity["name"]
+    tts_text = _TTS_TEMPLATE.format(name=name)
+
+    variants = []
+    for ad in rows:
+        raw = ad["default_props"]
+        props = dict(json.loads(raw) if isinstance(raw, str) else (raw or {}))
+        props[ad["personalized_field"]] = name
+        variants.append(AdSelection(
+            type="personalized",
+            base_video=Path(ad["base_video"]),
+            tts_text=tts_text,
+            person_uuid=trigger["uuid"],
+            composition_id=f"comp-{ad['slug']}",
+            overlay_props=props,
+        ))
+    return [variants[i % len(variants)] for i in range(count)]

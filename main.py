@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import os
@@ -6,7 +7,7 @@ import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Set
+from typing import Optional
 
 import httpx
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -16,11 +17,12 @@ from pydantic import BaseModel
 
 from src.assembly.assembler import _INSERT_MIN_OFFSET_MS, assemble
 from src.db import create_pool
+from src.display_assignment import DisplayAssigner
 from src.overlay.conformance import assert_conformant
 from src.overlay.http_renderer import build_overlay_inserts_http, render_composition_http
 from src.overlay.probe import probe_video
 from src.overlay.spec import default_overlay_spec
-from src.selector.selector import select
+from src.selector.selector import select, select_variants
 from src.tts.gateway import synthesize
 
 logging.basicConfig(level=logging.INFO)
@@ -32,6 +34,9 @@ _VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "")
 _HOST = os.getenv("HOST", "localhost")
 _PORT = int(os.getenv("PORT", "8002"))
 _OVERLAY_SIDECAR_URL = os.getenv("OVERLAY_SIDECAR_URL", "http://mras-overlays:3000")
+# How long a display stays reserved after being assigned a personalized clip
+# (~clip length + compose time); an expired reservation frees it automatically.
+_DISPLAY_HOLD_SECS = float(os.getenv("DISPLAY_HOLD_SECS", "12"))
 
 
 def build_playlist(assets_dir: Path, base_url: str) -> list[str]:
@@ -44,24 +49,40 @@ def build_playlist(assets_dir: Path, base_url: str) -> list[str]:
 
 
 class WSManager:
-    def __init__(self) -> None:
-        self._clients: Set[WebSocket] = set()
+    """Kiosk connections. T-D windows connect as /ws?screen_id=display-<n>
+    and can be targeted individually; untagged (legacy) clients still get
+    broadcasts but never targeted sends."""
 
-    async def connect(self, ws: WebSocket) -> None:
+    def __init__(self) -> None:
+        self._clients: dict[WebSocket, Optional[str]] = {}
+
+    async def connect(self, ws: WebSocket, screen_id: Optional[str] = None) -> None:
         await ws.accept()
-        self._clients.add(ws)
+        self._clients[ws] = screen_id
 
     def disconnect(self, ws: WebSocket) -> None:
-        self._clients.discard(ws)
+        self._clients.pop(ws, None)
 
-    async def broadcast(self, msg: dict) -> None:
-        dead: Set[WebSocket] = set()
-        for ws in list(self._clients):
+    def screen_ids(self) -> list:
+        return sorted({sid for sid in self._clients.values() if sid})
+
+    async def _send(self, targets: list, msg: dict) -> None:
+        dead = []
+        for ws in targets:
             try:
                 await ws.send_json(msg)
             except Exception:
-                dead.add(ws)
-        self._clients -= dead
+                dead.append(ws)
+        for ws in dead:
+            self._clients.pop(ws, None)
+
+    async def send_to(self, screen_id: str, msg: dict) -> None:
+        await self._send(
+            [ws for ws, sid in list(self._clients.items()) if sid == screen_id], msg
+        )
+
+    async def broadcast(self, msg: dict) -> None:
+        await self._send(list(self._clients), msg)
 
 
 async def build_custom_overlay_inserts(
@@ -94,6 +115,7 @@ async def lifespan(app: FastAPI):
     # Generous timeout: spanning a full clip means the sidecar renders more frames (a few–tens of seconds).
     app.state.http = httpx.AsyncClient(timeout=180)
     app.state.ws = WSManager()
+    app.state.assigner = DisplayAssigner()
     yield
     await app.state.http.aclose()
     await app.state.db.close()
@@ -122,10 +144,104 @@ class TriggerPayload(BaseModel):
     is_new_visitor: bool = True
     scene_context: dict = {}
     screen_id: str = "screen_0"
+    # People visible in the triggering frame (T-V) — drives display splitting.
+    faces_in_frame: int = 1
+
+
+async def _render_overlay_inserts(selection, trigger_id: str):
+    """Best-effort overlay for one selection — failure ships the ad bare."""
+    if selection.composition_id:
+        try:
+            work = Path(tempfile.mkdtemp(prefix="overlay_", dir=_OUTPUT_DIR))
+            return await build_custom_overlay_inserts(
+                app.state.http, _OVERLAY_SIDECAR_URL, selection.composition_id,
+                selection.overlay_props, selection.base_video, work,
+            )
+        except Exception as exc:
+            # Never drop the ad on overlay failure — ship it without the on-screen overlay.
+            await _log(app.state.db, trigger_id, "overlay", "error", {"error": str(exc)})
+            return None
+    if selection.overlay_text:
+        try:
+            spec = default_overlay_spec(selection.overlay_text)
+            work = Path(tempfile.mkdtemp(prefix="overlay_", dir=_OUTPUT_DIR))
+            return await build_overlay_inserts_http(
+                [spec], selection.base_video, work, app.state.http, _OVERLAY_SIDECAR_URL
+            )
+        except Exception as exc:
+            # Never drop the ad on overlay failure — ship it without the on-screen text.
+            await _log(app.state.db, trigger_id, "overlay", "error", {"error": str(exc)})
+            return None
+    return None
+
+
+async def _compose_variant(selection, audio_path, trigger_id: str, variant_id: str) -> Path:
+    overlay_inserts = await _render_overlay_inserts(selection, trigger_id)
+    return await assemble(
+        selection.base_video, [(audio_path, _INSERT_MIN_OFFSET_MS)], variant_id,
+        overlay_inserts=overlay_inserts,
+    )
 
 
 @app.post("/trigger")
 async def trigger_endpoint(body: TriggerPayload):
+    screen_ids = app.state.ws.screen_ids()
+    if not screen_ids:
+        # Legacy single-variant broadcast (no screen_id-tagged kiosk connected).
+        return await _trigger_single_broadcast(body)
+
+    assigned = app.state.assigner.assign(
+        screen_ids, body.faces_in_frame, time.time(), _DISPLAY_HOLD_SECS
+    )
+    if not assigned:
+        await _log(app.state.db, body.trigger_id, "composition", "no_display", {})
+        return {"status": "no_display"}
+
+    selections = await select_variants(body.model_dump(), app.state.db, len(assigned))
+    if selections[0].type == "standard":
+        await _log(app.state.db, body.trigger_id, "composition", "standard_selected", {})
+        return {"status": "standard"}
+
+    # One name, one voice clip — shared by every variant (cache-friendly).
+    audio_path = await synthesize(
+        selections[0].tts_text, selections[0].person_uuid, _VOICE_ID, app.state.http
+    )
+    if audio_path is None:
+        await _log(app.state.db, body.trigger_id, "tts_attempt", "error",
+                   {"error": "TTS_UNAVAILABLE"})
+        return {"status": "tts_failed"}
+    await _log(app.state.db, body.trigger_id, "tts_attempt", "success", {})
+
+    # Compose every variant IN PARALLEL (owner direction: real-time parallel
+    # composition); one failed variant must not sink the others.
+    results = await asyncio.gather(
+        *[
+            _compose_variant(sel, audio_path, body.trigger_id, f"{body.trigger_id}-{i}")
+            for i, sel in enumerate(selections)
+        ],
+        return_exceptions=True,
+    )
+
+    sent = 0
+    for screen_id, result in zip(assigned, results):
+        if isinstance(result, BaseException):
+            await _log(app.state.db, body.trigger_id, "assembly", "error",
+                       {"screen_id": screen_id, "error": str(result)})
+            continue
+        video_url = f"http://{_HOST}:{_PORT}/media/{result.name}"
+        await app.state.ws.send_to(screen_id, {
+            "type": "play",
+            "trigger_id": body.trigger_id,
+            "video_url": video_url,
+        })
+        await _log(app.state.db, body.trigger_id, "playback", "dispatched",
+                   {"video": result.name, "screen_id": screen_id})
+        sent += 1
+
+    return {"status": "ok", "displays": sent} if sent else {"status": "assembly_failed"}
+
+
+async def _trigger_single_broadcast(body: TriggerPayload):
     selection = await select(body.model_dump(), app.state.db)
 
     if selection.type == "standard":
@@ -145,29 +261,7 @@ async def trigger_endpoint(body: TriggerPayload):
 
     await _log(app.state.db, body.trigger_id, "tts_attempt", "success", {})
 
-    overlay_inserts = None
-    if selection.composition_id:
-        try:
-            work = Path(tempfile.mkdtemp(prefix="overlay_", dir=_OUTPUT_DIR))
-            overlay_inserts = await build_custom_overlay_inserts(
-                app.state.http, _OVERLAY_SIDECAR_URL, selection.composition_id,
-                selection.overlay_props, selection.base_video, work,
-            )
-        except Exception as exc:
-            # Never drop the ad on overlay failure — ship it without the on-screen overlay.
-            await _log(app.state.db, body.trigger_id, "overlay", "error", {"error": str(exc)})
-            overlay_inserts = None
-    elif selection.overlay_text:
-        try:
-            spec = default_overlay_spec(selection.overlay_text)
-            work = Path(tempfile.mkdtemp(prefix="overlay_", dir=_OUTPUT_DIR))
-            overlay_inserts = await build_overlay_inserts_http(
-                [spec], selection.base_video, work, app.state.http, _OVERLAY_SIDECAR_URL
-            )
-        except Exception as exc:
-            # Never drop the ad on overlay failure — ship it without the on-screen text.
-            await _log(app.state.db, body.trigger_id, "overlay", "error", {"error": str(exc)})
-            overlay_inserts = None
+    overlay_inserts = await _render_overlay_inserts(selection, body.trigger_id)
 
     try:
         video_path = await assemble(
@@ -238,7 +332,8 @@ async def preview_endpoint(body: PreviewPayload):
 
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
-    await app.state.ws.connect(ws)
+    # T-D kiosk windows identify themselves via ?screen_id=display-<n>.
+    await app.state.ws.connect(ws, ws.query_params.get("screen_id"))
     try:
         while True:
             await ws.receive_text()

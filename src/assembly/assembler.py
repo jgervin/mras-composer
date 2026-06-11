@@ -12,12 +12,15 @@ _FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 # coached to keep the name out of the first 250ms; this is the code-level safety net.
 _INSERT_MIN_OFFSET_MS = 250
 _SEMAPHORE: Optional[asyncio.Semaphore] = None
+# Per-display variants render simultaneously (T-C, owner direction:
+# real-time parallel composition). D8's original value was 1.
+_FFMPEG_CONCURRENCY = int(os.getenv("FFMPEG_CONCURRENCY", "4"))
 
 
 def _sem() -> asyncio.Semaphore:
     global _SEMAPHORE
     if _SEMAPHORE is None:
-        _SEMAPHORE = asyncio.Semaphore(1)
+        _SEMAPHORE = asyncio.Semaphore(max(1, _FFMPEG_CONCURRENCY))
     return _SEMAPHORE
 
 
