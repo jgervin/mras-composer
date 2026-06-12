@@ -1,5 +1,6 @@
 import asyncio
 import json
+from dataclasses import replace
 import logging
 import os
 import tempfile
@@ -37,6 +38,9 @@ _OVERLAY_SIDECAR_URL = os.getenv("OVERLAY_SIDECAR_URL", "http://mras-overlays:30
 # How long a display stays reserved after being assigned a personalized clip
 # (~clip length + compose time); an expired reservation frees it automatically.
 _DISPLAY_HOLD_SECS = float(os.getenv("DISPLAY_HOLD_SECS", "12"))
+# Overlay window as a fraction of the base video (owner rule 2026-06-11):
+# default = half the clip; the demo rig sets 1.0 = the entire clip.
+_OVERLAY_FRACTION = float(os.getenv("OVERLAY_DURATION_FRACTION", "0.5"))
 
 
 def build_playlist(assets_dir: Path, base_url: str) -> list[str]:
@@ -99,7 +103,9 @@ async def build_custom_overlay_inserts(
         "baseWidth": meta.width,
         "baseHeight": meta.height,
         "fps": meta.fps,
-        "durationMs": int(props.get("durationMs", 2000)),
+        # Unspecified duration = OVERLAY_DURATION_FRACTION of the base clip.
+        "durationMs": int(props["durationMs"]) if "durationMs" in props
+        else int(meta.duration_ms * _OVERLAY_FRACTION),
     }
     clip = await render_composition_http(client, sidecar_url, composition_id, enriched, work)
     assert_conformant(clip, meta)
@@ -149,30 +155,35 @@ class TriggerPayload(BaseModel):
 
 
 async def _render_overlay_inserts(selection, trigger_id: str):
-    """Best-effort overlay for one selection — failure ships the ad bare."""
+    """Best-effort overlays for one selection — any failure ships the ad with
+    whatever rendered (never drop the ad). Owner rule: a spoken name is ALWAYS
+    also written, so the animated name-text overlay is composited on top of
+    every personalized variant, custom-Remotion component or not."""
+    inserts = []
     if selection.composition_id:
         try:
             work = Path(tempfile.mkdtemp(prefix="overlay_", dir=_OUTPUT_DIR))
-            return await build_custom_overlay_inserts(
+            inserts += await build_custom_overlay_inserts(
                 app.state.http, _OVERLAY_SIDECAR_URL, selection.composition_id,
                 selection.overlay_props, selection.base_video, work,
             )
         except Exception as exc:
-            # Never drop the ad on overlay failure — ship it without the on-screen overlay.
             await _log(app.state.db, trigger_id, "overlay", "error", {"error": str(exc)})
-            return None
-    if selection.overlay_text:
+    name = selection.person_name or selection.overlay_text
+    if name:
         try:
-            spec = default_overlay_spec(selection.overlay_text)
+            meta = probe_video(selection.base_video)
+            spec = replace(
+                default_overlay_spec(name),
+                duration_ms=max(500, int(meta.duration_ms * _OVERLAY_FRACTION)),
+            )
             work = Path(tempfile.mkdtemp(prefix="overlay_", dir=_OUTPUT_DIR))
-            return await build_overlay_inserts_http(
+            inserts += await build_overlay_inserts_http(
                 [spec], selection.base_video, work, app.state.http, _OVERLAY_SIDECAR_URL
             )
         except Exception as exc:
-            # Never drop the ad on overlay failure — ship it without the on-screen text.
             await _log(app.state.db, trigger_id, "overlay", "error", {"error": str(exc)})
-            return None
-    return None
+    return inserts or None
 
 
 async def _compose_variant(selection, audio_path, trigger_id: str, variant_id: str) -> Path:
@@ -222,36 +233,36 @@ async def trigger_endpoint(body: TriggerPayload):
         return {"status": "tts_failed"}
     await _log(app.state.db, body.trigger_id, "tts_attempt", "success", {})
 
-    # Compose every variant IN PARALLEL (owner direction: real-time parallel
-    # composition); one failed variant must not sink the others.
-    results = await asyncio.gather(
-        *[
-            _compose_variant(sel, audio_path, body.trigger_id, f"{body.trigger_id}-{i}")
-            for i, sel in enumerate(selections)
-        ],
-        return_exceptions=True,
-    )
-
-    sent = 0
-    for screen_id, result in zip(assigned, results):
-        if isinstance(result, BaseException):
+    # Compose every variant IN PARALLEL and ship each one to its display the
+    # MOMENT it is ready — the first screen starts playing while the rest are
+    # still rendering (observed pre-fix: 28s wall for the first video because
+    # delivery waited for all variants). One failure never sinks the others.
+    async def compose_and_send(i: int, screen_id: str, selection) -> int:
+        try:
+            video_path = await _compose_variant(
+                selection, audio_path, body.trigger_id, f"{body.trigger_id}-{i}"
+            )
+        except Exception as exc:
             await _log(app.state.db, body.trigger_id, "assembly", "error",
-                       {"screen_id": screen_id, "error": str(result)})
-            continue
-        video_url = f"http://{_HOST}:{_PORT}/media/{result.name}"
-        selection = selections[assigned.index(screen_id)]
+                       {"screen_id": screen_id, "error": str(exc)})
+            return 0
         await app.state.ws.send_to(screen_id, {
             "type": "play",
             "trigger_id": body.trigger_id,
-            "video_url": video_url,
+            "video_url": f"http://{_HOST}:{_PORT}/media/{video_path.name}",
             # Kiosk debug badge (KIOSK_DEBUG=1): which ad, for whom —
             # independent of the video pipeline, shows even if overlays fail.
             "ad": selection.composition_id or "legacy-overlay",
             "person": selection.person_name,
         })
         await _log(app.state.db, body.trigger_id, "playback", "dispatched",
-                   {"video": result.name, "screen_id": screen_id})
-        sent += 1
+                   {"video": video_path.name, "screen_id": screen_id})
+        return 1
+
+    sent = sum(await asyncio.gather(*[
+        compose_and_send(i, screen_id, sel)
+        for i, (screen_id, sel) in enumerate(zip(assigned, selections))
+    ]))
 
     if sent == 0:
         app.state.assigner.release(assigned)
