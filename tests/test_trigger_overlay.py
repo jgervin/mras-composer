@@ -5,7 +5,7 @@ assemble itself is unchanged and mocked. Covers: personalized → overlay passed
 assemble; sidecar failure → fall back to a clip without an overlay (never drop the ad).
 """
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -27,12 +27,16 @@ def _client_with(select_result, *, overlay_inserts=None, overlay_raises=False):
         return_value=overlay_inserts,
     )
 
+    meta = MagicMock()
+    meta.width, meta.height, meta.fps, meta.duration_ms = 854, 480, 24, 8000
     patches = [
         patch("main.create_pool", AsyncMock(return_value=db)),
         patch("main.select", AsyncMock(return_value=select_result)),
         patch("main.synthesize", synth),
         patch("main.assemble", assemble),
         patch("main.build_overlay_inserts_http", build),
+        # the always-write-the-name branch probes the base for its duration
+        patch("main.probe_video", MagicMock(return_value=meta)),
     ]
     for p in patches:
         p.start()
