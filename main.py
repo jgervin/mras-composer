@@ -190,6 +190,13 @@ async def trigger_endpoint(body: TriggerPayload):
         # Legacy single-variant broadcast (no screen_id-tagged kiosk connected).
         return await _trigger_single_broadcast(body)
 
+    # Standard gate FIRST (cheap query): strangers and blocked people must
+    # not reserve (then release) the display wall or spam no_display events.
+    gate = await select(body.model_dump(), app.state.db)
+    if gate.type == "standard":
+        await _log(app.state.db, body.trigger_id, "composition", "standard_selected", {})
+        return {"status": "standard"}
+
     assigned = app.state.assigner.assign(
         screen_ids, body.faces_in_frame, time.time(), _DISPLAY_HOLD_SECS
     )
@@ -232,10 +239,15 @@ async def trigger_endpoint(body: TriggerPayload):
                        {"screen_id": screen_id, "error": str(result)})
             continue
         video_url = f"http://{_HOST}:{_PORT}/media/{result.name}"
+        selection = selections[assigned.index(screen_id)]
         await app.state.ws.send_to(screen_id, {
             "type": "play",
             "trigger_id": body.trigger_id,
             "video_url": video_url,
+            # Kiosk debug badge (KIOSK_DEBUG=1): which ad, for whom —
+            # independent of the video pipeline, shows even if overlays fail.
+            "ad": selection.composition_id or "legacy-overlay",
+            "person": selection.person_name,
         })
         await _log(app.state.db, body.trigger_id, "playback", "dispatched",
                    {"video": result.name, "screen_id": screen_id})

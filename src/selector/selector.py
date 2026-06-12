@@ -20,6 +20,8 @@ class AdSelection:
     # Custom-component ad fields (M4): set when an active bound component ad is found.
     composition_id: str | None = None
     overlay_props: dict | None = None
+    # Identified person's display name (kiosk debug badge; None for standard).
+    person_name: str | None = None
 
 
 async def select(trigger: dict, db) -> AdSelection:
@@ -53,6 +55,7 @@ async def select(trigger: dict, db) -> AdSelection:
             person_uuid=person_uuid,
             composition_id=f"comp-{ad['slug']}",
             overlay_props=props,
+            person_name=row["name"],
         )
 
     return AdSelection(
@@ -61,6 +64,7 @@ async def select(trigger: dict, db) -> AdSelection:
         tts_text=tts_text,
         person_uuid=person_uuid,
         overlay_text=_OVERLAY_TEMPLATE.format(name=row["name"]),
+        person_name=row["name"],
     )
 
 
@@ -78,7 +82,8 @@ async def select_variants(trigger: dict, db, count: int) -> list[AdSelection]:
         "SELECT a.base_video, c.slug, a.default_props, a.personalized_field "
         "FROM ads a JOIN components c ON c.id = a.component_id "
         "WHERE a.is_active = true AND c.status = 'ready' "
-        "ORDER BY a.created_at DESC LIMIT $1",
+        # random per trigger: newest-first starved text-bearing ads on 2-display splits
+        "ORDER BY random() LIMIT $1",
         count,
     )
     if not rows:
@@ -105,5 +110,6 @@ async def select_variants(trigger: dict, db, count: int) -> list[AdSelection]:
             person_uuid=trigger["uuid"],
             composition_id=f"comp-{ad['slug']}",
             overlay_props=props,
+            person_name=name,
         ))
     return [variants[i % len(variants)] for i in range(count)]

@@ -33,6 +33,8 @@ def _client(selections, screen_ids, assigned=None):
 
     patches = [
         patch("main.create_pool", AsyncMock(return_value=db)),
+        # The standard gate runs select() first; personalized lets it pass.
+        patch("main.select", AsyncMock(return_value=_sel("gate"))),
         patch("main.select_variants", AsyncMock(return_value=selections)),
         patch("main.synthesize", synth),
         patch("main.assemble", assemble),
@@ -134,14 +136,42 @@ def test_one_failed_variant_does_not_sink_the_others():
         _stop(client, mocks)
 
 
-def test_standard_selection_releases_the_reserved_displays():
-    """A new visitor must not freeze the display wall: reservations made at
-    assign-time are released when no personalized ad will play."""
+def test_standard_variants_after_gate_release_the_reserved_displays():
+    """Rare race: the gate saw a personalized selection but the ads vanished
+    before select_variants — reservations must still be released."""
     std = AdSelection(type="standard", base_video=Path("/assets/standard.mp4"))
     client, mocks = _client([std], ["display-1", "display-2"])
     try:
-        res = client.post("/trigger", json={"trigger_id": "t1", "is_new_visitor": True})
+        res = client.post("/trigger", json={"trigger_id": "t1", "uuid": "u1",
+                                            "is_new_visitor": False})
         assert res.json()["status"] == "standard"
         mocks["assigner"].release.assert_called_once_with(["display-1", "display-2"])
     finally:
         _stop(client, mocks)
+
+
+def test_play_message_carries_ad_and_person_debug_fields():
+    client, mocks = _client([_sel("neon")], ["display-1"])
+    try:
+        client.post("/trigger", json={
+            "trigger_id": "t1", "uuid": "u1", "is_new_visitor": False,
+        })
+        msg = mocks["ws"].send_to.await_args.args[1]
+        assert msg["ad"] == "comp-neon"
+        assert "person" in msg
+    finally:
+        _stop(client, mocks)
+
+
+def test_new_visitor_never_touches_the_display_assigner():
+    """Strangers must not reserve (and then release) the wall — the standard
+    check runs before assignment."""
+    std = AdSelection(type="standard", base_video=Path("/assets/standard.mp4"))
+    client, mocks = _client([std], ["display-1", "display-2"])
+    with patch("main.select", AsyncMock(return_value=std)):  # gate says standard
+        try:
+            res = client.post("/trigger", json={"trigger_id": "t1", "is_new_visitor": True})
+            assert res.json()["status"] == "standard"
+            mocks["assigner"].assign.assert_not_called()
+        finally:
+            _stop(client, mocks)
