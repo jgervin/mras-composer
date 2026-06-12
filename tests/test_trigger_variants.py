@@ -145,3 +145,30 @@ def test_standard_selection_releases_the_reserved_displays():
         mocks["assigner"].release.assert_called_once_with(["display-1", "display-2"])
     finally:
         _stop(client, mocks)
+
+
+def test_play_message_carries_ad_and_person_debug_fields():
+    client, mocks = _client([_sel("neon")], ["display-1"])
+    try:
+        client.post("/trigger", json={
+            "trigger_id": "t1", "uuid": "u1", "is_new_visitor": False,
+        })
+        msg = mocks["ws"].send_to.await_args.args[1]
+        assert msg["ad"] == "comp-neon"
+        assert "person" in msg
+    finally:
+        _stop(client, mocks)
+
+
+def test_new_visitor_never_touches_the_display_assigner():
+    """Strangers must not reserve (and then release) the wall — the standard
+    check runs before assignment."""
+    std = AdSelection(type="standard", base_video=Path("/assets/standard.mp4"))
+    client, mocks = _client([std], ["display-1", "display-2"])
+    with patch("main.select", AsyncMock(return_value=std)):
+        try:
+            res = client.post("/trigger", json={"trigger_id": "t1", "is_new_visitor": True})
+            assert res.json()["status"] == "standard"
+            mocks["assigner"].assign.assert_not_called()
+        finally:
+            _stop(client, mocks)

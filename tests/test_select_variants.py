@@ -82,3 +82,20 @@ async def test_identity_deleted_mid_flight_falls_back_instead_of_crashing():
 
     out = await select_variants(_trigger(), db, count=2)
     assert len(out) == 2 and all(s.type == "personalized" for s in out)
+
+
+async def test_variant_ads_are_ordered_randomly_not_by_recency():
+    """Newest-first selection deterministically served the two newest
+    (decorative, no-text) ads to every 2-display person — name spoken,
+    never written. Order must be random per trigger."""
+    db = _db(_identity_row(), [_ad_row("neon")])
+    await select_variants(_trigger(), db, count=2)
+    query = db.fetch.call_args.args[0]
+    assert "random()" in query.lower()
+    assert "created_at desc" not in query.lower()
+
+
+async def test_selections_carry_person_name_for_kiosk_debug():
+    db = _db(_identity_row(name="Ragnar"), [_ad_row("neon")])
+    out = await select_variants(_trigger(), db, count=1)
+    assert out[0].person_name == "Ragnar"
