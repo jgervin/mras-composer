@@ -1,3 +1,4 @@
+import math
 from enum import IntEnum
 
 
@@ -25,3 +26,11 @@ def even_split(active_newest_first: list[str], displays: list[str]) -> dict[str,
     for i, uuid in enumerate(active_newest_first):
         owners.extend([uuid] * (base + (1 if i < rem else 0)))
     return {displays[i]: owners[i] for i in range(min(d, len(owners)))}
+
+
+def pair_slot(display: str, owned_displays: list[str]) -> int:
+    """Round-2 pairing: split an owner's displays into two contiguous groups —
+    the first ceil(n/2) show ad A (slot 0), the rest show ad B (slot 1).
+    n=1→[0], n=2→[0,1], n=3→[0,0,1], n=4→[0,0,1,1]."""
+    half = math.ceil(len(owned_displays) / 2)
+    return 0 if owned_displays.index(display) < half else 1
