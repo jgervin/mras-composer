@@ -37,3 +37,25 @@ def test_on_identify_starts_opener_on_all_idle_displays_and_renders_ahead():
     # exactly one render-ahead for the round-2 pair
     assert RenderAhead("jason", Round.ROUND2) in cmds
     assert sum(isinstance(c, RenderAhead) for c in cmds) == 1
+
+
+def test_clip_ended_advances_to_round2_paired_AABB():
+    o = _orch()
+    o.on_identify("jason")  # opener on 1..4 (all now playing)
+    # all four openers end (first one advances the program to round 2)
+    cmds = []
+    for d in ["display-1", "display-2", "display-3", "display-4"]:
+        cmds = o.on_clip_ended(d)
+    # after the last clip_ended, every display projects round 2, paired A,A,B,B
+    plays = {c.display: c for c in cmds if isinstance(c, Play)}
+    # the last-ended display (display-4) is reassigned in this call
+    assert plays["display-4"] == Play("display-4", "jason", Round.ROUND2, 1)
+
+
+def test_first_opener_end_advances_program_once():
+    o = _orch(displays=("display-1", "display-2"))
+    o.on_identify("jason")            # opener on 1,2
+    cmds1 = o.on_clip_ended("display-1")  # first → advance to round 2, play round2 on d1
+    assert Play("display-1", "jason", Round.ROUND2, 0) in cmds1
+    cmds2 = o.on_clip_ended("display-2")  # second → program already round2, no double-advance
+    assert Play("display-2", "jason", Round.ROUND2, 1) in cmds2
