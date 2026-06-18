@@ -23,6 +23,7 @@ from src.overlay.conformance import assert_conformant
 from src.overlay.http_renderer import build_overlay_inserts_http, render_composition_http
 from src.overlay.probe import probe_video
 from src.overlay.spec import default_overlay_spec
+from src.orchestrator.watchdog import Watchdog
 from src.selector.selector import select, select_variants
 from src.tts.gateway import synthesize
 
@@ -143,9 +144,30 @@ async def lifespan(app: FastAPI):
 
     app.state.runtime = OrchestratorRuntime(
         render=renderer.render, send_play=_send_play, send_idle=_send_idle,
-        arm_watchdog=lambda d: None, cancel_watchdog=lambda d: None,  # Task 6
+        arm_watchdog=lambda d: None, cancel_watchdog=lambda d: None,  # wired below
     )
+
+    # Watchdog: advances a display even if its kiosk never emits clip_ended
+    # (dropped WS / dead display). Fires the same clip_ended path after the
+    # clip's expected duration + grace.
+    async def _fire_clip_ended(display):
+        cmds = app.state.orchestrator.on_clip_ended(display)
+        await app.state.runtime.apply(cmds)
+
+    watchdog = Watchdog(on_timeout=_fire_clip_ended,
+                        clip_seconds=lambda d: float(os.getenv("CLIP_SECONDS", "12")))
+    app.state.runtime._arm_watchdog = watchdog.arm
+    app.state.runtime._cancel_watchdog = watchdog.cancel
+
+    # Periodic tick: expires presence TTLs so people who left free their displays.
+    async def _tick_loop():
+        while True:
+            await asyncio.sleep(float(os.getenv("PRESENCE_TICK_S", "1.0")))
+            await app.state.runtime.apply(app.state.orchestrator.tick())
+
+    app.state.tick_task = asyncio.create_task(_tick_loop())
     yield
+    app.state.tick_task.cancel()
     await app.state.http.aclose()
     await app.state.db.close()
 
