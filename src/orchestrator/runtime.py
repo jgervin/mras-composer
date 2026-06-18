@@ -48,7 +48,17 @@ class OrchestratorRuntime:
         self._inflight[key] = asyncio.create_task(run())
 
     async def _play(self, c: Play) -> None:
-        raise NotImplementedError  # Task 2
+        urls = self._cache.get((c.owner, c.round))
+        if urls is not None:
+            self._pending.pop(c.display, None)
+            url = urls[min(c.pair_slot, len(urls) - 1)]
+            await self._send_play(c.display, url, c.owner, c.round)
+            self._arm_watchdog(c.display)
+        else:
+            # render-gap: idle now, resume this display when the render lands
+            self._pending[c.display] = (c.owner, c.round, c.pair_slot)
+            await self._send_idle(c.display)
+            self._ensure_render(c.owner, c.round)
 
     async def _resume_pending(self, owner, rnd) -> None:
         return  # no-op until Task 3 (no pending displays to resume yet)
