@@ -61,7 +61,13 @@ class OrchestratorRuntime:
             self._ensure_render(c.owner, c.round)
 
     async def _resume_pending(self, owner, rnd) -> None:
-        return  # no-op until Task 3 (no pending displays to resume yet)
+        urls = self._cache[(owner, rnd)]
+        for display, (o, r, slot) in list(self._pending.items()):
+            if (o, r) == (owner, rnd):
+                del self._pending[display]
+                await self._send_play(display, urls[min(slot, len(urls) - 1)],
+                                      owner, rnd)
+                self._arm_watchdog(display)
 
     async def drain(self) -> None:
         """Test/shutdown helper: await all in-flight render tasks."""
