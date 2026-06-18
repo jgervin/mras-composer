@@ -49,6 +49,19 @@ class Orchestrator:
             self._programs[owner].round = next_round(self._programs[owner].round)
         return self._reassign()
 
+    def on_presence(self, uuids: list[str]) -> list:
+        now = self._clock()
+        for uuid in uuids:
+            self._present[uuid] = now
+        return self.tick()
+
+    def tick(self) -> list:
+        now = self._clock()
+        expired = [u for u, seen in self._present.items() if now - seen > self._ttl]
+        for u in expired:
+            del self._present[u]
+        return self._reassign()
+
     # ---- internals ----
 
     def _active_newest_first(self) -> list[str]:
