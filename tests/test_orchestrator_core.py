@@ -87,3 +87,27 @@ def test_newest_wins_takes_freed_displays_at_boundaries():
     play = next(c for c in cmds if isinstance(c, Play))
     assert play.owner == "maria"
     assert play.round == Round.OPENER
+
+
+def test_presence_ttl_expiry_drops_owner_and_idles_on_next_boundary():
+    clock = _Clock(0.0)
+    o = Orchestrator(["display-1"], clock=clock, presence_ttl_s=5.0)
+    o.on_identify("jason")               # present at t=0, opener on d1 (playing)
+    clock.t = 3.0
+    o.on_presence(["jason"])             # heartbeat refreshes last_seen=3.0
+    clock.t = 10.0                       # >5s since last heartbeat → expired
+    o.tick()                             # jason no longer present; d1 still playing → skipped
+    cmds = o.on_clip_ended("display-1")  # clip ends → no active owner → idle
+    assert Idle("display-1") in cmds
+
+
+def test_presence_heartbeat_keeps_owner_active():
+    clock = _Clock(0.0)
+    o = Orchestrator(["display-1"], clock=clock, presence_ttl_s=5.0)
+    o.on_identify("jason")
+    clock.t = 4.0
+    o.on_presence(["jason"])             # refresh
+    clock.t = 6.0                        # only 2s since refresh → still present
+    o.tick()
+    cmds = o.on_clip_ended("display-1")  # ends opener → advances to round 2, still jason
+    assert any(isinstance(c, Play) and c.owner == "jason" for c in cmds)
