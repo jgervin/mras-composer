@@ -111,3 +111,21 @@ def test_presence_heartbeat_keeps_owner_active():
     o.tick()
     cmds = o.on_clip_ended("display-1")  # ends opener → advances to round 2, still jason
     assert any(isinstance(c, Play) and c.owner == "jason" for c in cmds)
+
+
+def test_remaining_active_person_reclaims_displays_after_other_leaves():
+    clock = _Clock(0.0)
+    o = Orchestrator(["display-1", "display-2"], clock=clock, presence_ttl_s=5.0)
+    o.on_identify("jason")    # t0: jason owns 1,2 (opener playing on both)
+    clock.t = 1.0
+    o.on_identify("maria")    # maria active; split 1/1 deferred to boundaries
+    # jason leaves (never heartbeats again); only maria keeps heartbeating
+    clock.t = 9.0
+    o.on_presence(["maria"])  # maria fresh at t=9
+    clock.t = 10.0
+    o.tick()                  # jason (last seen t=0) expires; maria (t=9) stays
+    # both displays end their clips → maria (only active) reclaims both
+    o.on_clip_ended("display-1")
+    cmds = o.on_clip_ended("display-2")
+    owners = {c.owner for c in cmds if isinstance(c, Play)}
+    assert owners == {"maria"}
