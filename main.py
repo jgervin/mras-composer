@@ -122,6 +122,29 @@ async def lifespan(app: FastAPI):
     app.state.http = httpx.AsyncClient(timeout=180)
     app.state.ws = WSManager()
     app.state.assigner = DisplayAssigner()
+
+    from src.orchestrator.core import Orchestrator
+    from src.orchestrator.runtime import OrchestratorRuntime
+    from src.orchestrator.renderer import Renderer
+    displays = [f"display-{i}" for i in range(1, int(os.getenv("DISPLAY_COUNT", "4")) + 1)]
+    app.state.orchestrator = Orchestrator(displays)
+    renderer = Renderer(
+        app.state.db, app.state.http,
+        compose=lambda sel, audio, tid, vid: _compose_variant(sel, audio, tid, vid),
+        url_for=lambda p: f"http://{_HOST}:{_PORT}/media/{p.name}",
+        synthesize=synthesize,
+    )
+
+    async def _send_play(display, url, owner, rnd):
+        await app.state.ws.send_to(display, {"type": "play", "video_url": url, "person": owner})
+
+    async def _send_idle(display):
+        await app.state.ws.send_to(display, {"type": "idle"})
+
+    app.state.runtime = OrchestratorRuntime(
+        render=renderer.render, send_play=_send_play, send_idle=_send_idle,
+        arm_watchdog=lambda d: None, cancel_watchdog=lambda d: None,  # Task 6
+    )
     yield
     await app.state.http.aclose()
     await app.state.db.close()
@@ -152,6 +175,24 @@ class TriggerPayload(BaseModel):
     screen_id: str = "screen_0"
     # People visible in the triggering frame (T-V) — drives display splitting.
     faces_in_frame: int = 1
+
+
+class PresencePerson(BaseModel):
+    uuid: str
+    first_seen: str | None = None
+
+
+class PresencePayload(BaseModel):
+    screen_id: str = "screen_0"
+    present: list[PresencePerson] = []
+
+
+@app.post("/presence")
+async def presence_endpoint(body: PresencePayload):
+    uuids = [p.uuid for p in body.present]
+    cmds = app.state.orchestrator.on_presence(uuids)
+    await app.state.runtime.apply(cmds)
+    return {"status": "ok", "present": len(uuids)}
 
 
 async def _render_overlay_inserts(selection, trigger_id: str):
@@ -365,7 +406,14 @@ async def ws_endpoint(ws: WebSocket):
     await app.state.ws.connect(ws, ws.query_params.get("screen_id"))
     try:
         while True:
-            await ws.receive_text()
+            raw = await ws.receive_text()
+            try:
+                msg = json.loads(raw)
+            except ValueError:
+                continue
+            if msg.get("type") == "clip_ended" and msg.get("screen_id"):
+                cmds = app.state.orchestrator.on_clip_ended(msg["screen_id"])
+                await app.state.runtime.apply(cmds)
     except WebSocketDisconnect:
         app.state.ws.disconnect(ws)
 
