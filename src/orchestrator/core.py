@@ -39,6 +39,16 @@ class Orchestrator:
         self._present[uuid] = now
         return self._reassign()
 
+    def on_clip_ended(self, display: str) -> list:
+        sc = self._screens[display]
+        sc.playing = False
+        owner = sc.owner
+        if owner is not None and owner in self._programs \
+                and self._programs[owner].round == sc.round:
+            # first display of this owner to finish the current round → advance
+            self._programs[owner].round = next_round(self._programs[owner].round)
+        return self._reassign()
+
     # ---- internals ----
 
     def _active_newest_first(self) -> list[str]:
