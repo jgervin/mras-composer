@@ -18,13 +18,12 @@ from pydantic import BaseModel
 
 from src.assembly.assembler import _INSERT_MIN_OFFSET_MS, assemble
 from src.db import create_pool
-from src.display_assignment import DisplayAssigner
 from src.overlay.conformance import assert_conformant
 from src.overlay.http_renderer import build_overlay_inserts_http, render_composition_http
 from src.overlay.probe import probe_video
 from src.overlay.spec import default_overlay_spec
 from src.orchestrator.watchdog import Watchdog
-from src.selector.selector import select, select_variants
+from src.selector.selector import select
 from src.tts.gateway import synthesize
 
 logging.basicConfig(level=logging.INFO)
@@ -36,9 +35,6 @@ _VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "")
 _HOST = os.getenv("HOST", "localhost")
 _PORT = int(os.getenv("PORT", "8002"))
 _OVERLAY_SIDECAR_URL = os.getenv("OVERLAY_SIDECAR_URL", "http://mras-overlays:3000")
-# How long a display stays reserved after being assigned a personalized clip
-# (~clip length + compose time); an expired reservation frees it automatically.
-_DISPLAY_HOLD_SECS = float(os.getenv("DISPLAY_HOLD_SECS", "12"))
 # Overlay window as a fraction of the base video (owner rule 2026-06-11):
 # default = half the clip; the demo rig sets 1.0 = the entire clip.
 _OVERLAY_FRACTION = float(os.getenv("OVERLAY_DURATION_FRACTION", "0.5"))
@@ -122,7 +118,6 @@ async def lifespan(app: FastAPI):
     # Generous timeout: spanning a full clip means the sidecar renders more frames (a few–tens of seconds).
     app.state.http = httpx.AsyncClient(timeout=180)
     app.state.ws = WSManager()
-    app.state.assigner = DisplayAssigner()
 
     from src.orchestrator.core import Orchestrator
     from src.orchestrator.runtime import OrchestratorRuntime
@@ -264,73 +259,23 @@ async def trigger_endpoint(body: TriggerPayload):
         # Legacy single-variant broadcast (no screen_id-tagged kiosk connected).
         return await _trigger_single_broadcast(body)
 
-    # Standard gate FIRST (cheap query): strangers and blocked people must
-    # not reserve (then release) the display wall or spam no_display events.
+    # Standard gate FIRST (cheap query): strangers and blocked people must not
+    # enter orchestration (which would reserve displays / spend a render slot).
     gate = await select(body.model_dump(), app.state.db)
     if gate.type == "standard":
         await _log(app.state.db, body.trigger_id, "composition", "standard_selected", {})
         return {"status": "standard"}
 
-    assigned = app.state.assigner.assign(
-        screen_ids, body.faces_in_frame, time.time(), _DISPLAY_HOLD_SECS
-    )
-    if not assigned:
-        await _log(app.state.db, body.trigger_id, "composition", "no_display", {})
-        return {"status": "no_display"}
-
-    selections = await select_variants(body.model_dump(), app.state.db, len(assigned))
-    if selections[0].type == "standard":
-        # Nothing personalized will play — don't hold the display wall hostage.
-        app.state.assigner.release(assigned)
-        await _log(app.state.db, body.trigger_id, "composition", "standard_selected", {})
-        return {"status": "standard"}
-
-    # One name, one voice clip — shared by every variant (cache-friendly).
-    audio_path = await synthesize(
-        selections[0].tts_text, selections[0].person_uuid, _VOICE_ID, app.state.http
-    )
-    if audio_path is None:
-        app.state.assigner.release(assigned)
-        await _log(app.state.db, body.trigger_id, "tts_attempt", "error",
-                   {"error": "TTS_UNAVAILABLE"})
-        return {"status": "tts_failed"}
-    await _log(app.state.db, body.trigger_id, "tts_attempt", "success", {})
-
-    # Compose every variant IN PARALLEL and ship each one to its display the
-    # MOMENT it is ready — the first screen starts playing while the rest are
-    # still rendering (observed pre-fix: 28s wall for the first video because
-    # delivery waited for all variants). One failure never sinks the others.
-    async def compose_and_send(i: int, screen_id: str, selection) -> int:
-        try:
-            video_path = await _compose_variant(
-                selection, audio_path, body.trigger_id, f"{body.trigger_id}-{i}"
-            )
-        except Exception as exc:
-            await _log(app.state.db, body.trigger_id, "assembly", "error",
-                       {"screen_id": screen_id, "error": str(exc)})
-            return 0
-        await app.state.ws.send_to(screen_id, {
-            "type": "play",
-            "trigger_id": body.trigger_id,
-            "video_url": f"http://{_HOST}:{_PORT}/media/{video_path.name}",
-            # Kiosk debug badge (KIOSK_DEBUG=1): which ad, for whom —
-            # independent of the video pipeline, shows even if overlays fail.
-            "ad": selection.composition_id or "legacy-overlay",
-            "person": selection.person_name,
-        })
-        await _log(app.state.db, body.trigger_id, "playback", "dispatched",
-                   {"video": video_path.name, "screen_id": screen_id})
-        return 1
-
-    sent = sum(await asyncio.gather(*[
-        compose_and_send(i, screen_id, sel)
-        for i, (screen_id, sel) in enumerate(zip(assigned, selections))
-    ]))
-
-    if sent == 0:
-        app.state.assigner.release(assigned)
-        return {"status": "assembly_failed"}
-    return {"status": "ok", "displays": sent}
+    # Temporal orchestration: hand the identity to the pure state machine and
+    # apply whatever commands fall out (play the opener now, render-ahead round
+    # 2, idle freed displays). The orchestrator owns the display wall — display
+    # splitting, round sequencing and rendering live in the orchestrator/runtime
+    # (advanced by kiosk clip_ended + the watchdog), not in this one-shot path.
+    cmds = app.state.orchestrator.on_identify(body.uuid)
+    await app.state.runtime.apply(cmds)
+    await _log(app.state.db, body.trigger_id, "composition", "orchestrated",
+               {"uuid": body.uuid})
+    return {"status": "orchestrated"}
 
 
 async def _trigger_single_broadcast(body: TriggerPayload):
