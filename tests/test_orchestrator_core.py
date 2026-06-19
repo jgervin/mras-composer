@@ -70,6 +70,13 @@ def test_program_caps_at_round2_then_idles_no_round3():
     assert not any(isinstance(c, Play) for c in cmds)  # no round 3 play
 
 
+def test_clip_ended_for_unknown_display_returns_empty():
+    # A kiosk connecting with a screen_id outside the configured displays must not
+    # crash the handler — on_clip_ended returns [] rather than raising KeyError.
+    o = _orch()
+    assert o.on_clip_ended("display-99") == []
+
+
 def test_new_identify_does_not_interrupt_playing_clips():
     o = _orch()
     o.on_identify("jason")           # jason opener on 1..4 (all playing)

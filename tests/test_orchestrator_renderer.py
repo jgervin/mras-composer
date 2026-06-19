@@ -25,6 +25,20 @@ async def test_round2_renders_two_variants_in_order():
     assert compose.await_count == 2
 
 
+async def test_one_failed_variant_does_not_sink_the_others():
+    # If one round-2 variant fails to compose, the other still yields a URL and the
+    # failing slot resolves to None (idle/standard fallback) — never raises, never
+    # drops both displays.
+    db, http = AsyncMock(), AsyncMock()
+    compose = AsyncMock(side_effect=[Path("/tmp/ok-0.mp4"), RuntimeError("boom")])
+    r = Renderer(db, http, compose=compose, url_for=lambda p: f"u/{p.name}",
+                 synthesize=AsyncMock(return_value=Path("/tmp/a.wav")))
+    with patch("src.orchestrator.renderer.select_variants",
+               AsyncMock(return_value=[_sel(), _sel()])):
+        urls = await r.render("jason", Round.ROUND2)
+    assert urls == ["u/ok-0.mp4", None]
+
+
 async def test_opener_renders_single_variant():
     db, http = AsyncMock(), AsyncMock()
     compose = AsyncMock(return_value=Path("/tmp/op.mp4"))
