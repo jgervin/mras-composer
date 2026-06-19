@@ -132,7 +132,14 @@ async def lifespan(app: FastAPI):
     )
 
     async def _send_play(display, url, owner, rnd):
-        await app.state.ws.send_to(display, {"type": "play", "video_url": url, "person": owner})
+        # `ad` drives the kiosk debug badge label. The renderer doesn't surface the
+        # selected ad's identifier through the runtime (plumbing it through the URL
+        # cache is disproportionate for a debug-only field), so send a best-effort
+        # label derived from owner + round, mirroring the renderer's trigger id.
+        await app.state.ws.send_to(display, {
+            "type": "play", "video_url": url, "person": owner,
+            "ad": f"orch-{owner}-{rnd.name.lower()}",
+        })
 
     async def _send_idle(display):
         await app.state.ws.send_to(display, {"type": "idle"})
@@ -149,8 +156,15 @@ async def lifespan(app: FastAPI):
         cmds = app.state.orchestrator.on_clip_ended(display)
         await app.state.runtime.apply(cmds)
 
-    watchdog = Watchdog(on_timeout=_fire_clip_ended,
-                        clip_seconds=lambda d: float(os.getenv("CLIP_SECONDS", "12")))
+    # Timeout must safely exceed the longest expected clip so the watchdog never
+    # cuts a real clip short — it's a dead-display backstop, not a clip timer.
+    # Defaults (clip 30s + 5s grace) clear typical ~10-15s clips with margin; both
+    # are env-configurable for tuning.
+    watchdog = Watchdog(
+        on_timeout=_fire_clip_ended,
+        clip_seconds=lambda d: float(os.getenv("CLIP_SECONDS", "30")),
+        grace_s=float(os.getenv("WATCHDOG_GRACE_S", "5")),
+    )
     app.state.runtime._arm_watchdog = watchdog.arm
     app.state.runtime._cancel_watchdog = watchdog.cancel
 
@@ -158,7 +172,12 @@ async def lifespan(app: FastAPI):
     async def _tick_loop():
         while True:
             await asyncio.sleep(float(os.getenv("PRESENCE_TICK_S", "1.0")))
-            await app.state.runtime.apply(app.state.orchestrator.tick())
+            # Guard each iteration: a raise here must not kill the tick loop, or
+            # presence TTLs stop expiring and displays never free up.
+            try:
+                await app.state.runtime.apply(app.state.orchestrator.tick())
+            except Exception:
+                logger.exception("tick loop iteration failed")
 
     app.state.tick_task = asyncio.create_task(_tick_loop())
     yield
