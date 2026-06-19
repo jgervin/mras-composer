@@ -40,7 +40,11 @@ class Orchestrator:
         return self._reassign()
 
     def on_clip_ended(self, display: str) -> list:
-        sc = self._screens[display]
+        # A kiosk may connect with a screen_id outside the configured displays;
+        # ignore clip_ended for unknown displays rather than raising KeyError.
+        sc = self._screens.get(display)
+        if sc is None:
+            return []
         sc.playing = False
         owner = sc.owner
         if owner is not None and owner in self._programs \
