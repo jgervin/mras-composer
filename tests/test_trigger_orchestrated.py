@@ -3,6 +3,7 @@ identified (non-standard) person to the temporal orchestrator instead of the
 old one-shot per-display fan-out. The standard/stranger gate still short-
 circuits BEFORE orchestration, and the no-screen-id legacy broadcast path is
 untouched (covered in depth by test_trigger_overlay.py)."""
+import asyncio
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
@@ -80,6 +81,34 @@ def test_standard_gate_short_circuits_before_orchestration():
         mocks["runtime"].apply.assert_not_awaited()
     finally:
         _stop(client, mocks)
+
+
+def test_orchestrated_play_logs_playback_event():
+    """Dispatching an orchestrated play must log a playback/dispatched event
+    (video filename + screen_id + person) so the Activity Feed renders the clip
+    link AND the gaze x playback attention-outcome join has its playback side.
+    The orchestrated runtime replaced the legacy fan-out, which was the only
+    emitter of playback events."""
+    db = AsyncMock()
+    ws = AsyncMock()
+    url = "http://host:8002/media/orch-u1-opener-0.mp4"
+    with patch("main._log", AsyncMock()) as log:
+        asyncio.run(main._dispatch_play(db, ws, "display-2", url, "u1", Round.OPENER))
+
+    # The WS play is still sent to the kiosk (unchanged behavior).
+    ws.send_to.assert_awaited_once()
+    display_arg, msg = ws.send_to.await_args.args
+    assert display_arg == "display-2"
+    assert msg["type"] == "play" and msg["video_url"] == url
+
+    # ...and a playback/dispatched event is logged with the clip filename.
+    log.assert_awaited_once()
+    _db, _trigger_id, event_type, status, payload = log.await_args.args
+    assert event_type == "playback"
+    assert status == "dispatched"
+    assert payload["video"] == "orch-u1-opener-0.mp4"
+    assert payload["screen_id"] == "display-2"
+    assert payload["person"] == "u1"
 
 
 def test_no_tagged_kiosk_uses_legacy_broadcast_not_orchestrator():

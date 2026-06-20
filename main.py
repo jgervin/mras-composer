@@ -132,14 +132,7 @@ async def lifespan(app: FastAPI):
     )
 
     async def _send_play(display, url, owner, rnd):
-        # `ad` drives the kiosk debug badge label. The renderer doesn't surface the
-        # selected ad's identifier through the runtime (plumbing it through the URL
-        # cache is disproportionate for a debug-only field), so send a best-effort
-        # label derived from owner + round, mirroring the renderer's trigger id.
-        await app.state.ws.send_to(display, {
-            "type": "play", "video_url": url, "person": owner,
-            "ad": f"orch-{owner}-{rnd.name.lower()}",
-        })
+        await _dispatch_play(app.state.db, app.state.ws, display, url, owner, rnd)
 
     async def _send_idle(display):
         await app.state.ws.send_to(display, {"type": "idle"})
@@ -407,6 +400,22 @@ async def ws_endpoint(ws: WebSocket):
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+async def _dispatch_play(db, ws, display, url, owner, rnd) -> None:
+    # `ad` drives the kiosk debug badge label. The renderer doesn't surface the
+    # selected ad's identifier through the runtime (plumbing it through the URL
+    # cache is disproportionate for a debug-only field), so send a best-effort
+    # label derived from owner + round, mirroring the renderer's trigger id.
+    await ws.send_to(display, {
+        "type": "play", "video_url": url, "person": owner,
+        "ad": f"orch-{owner}-{rnd.name.lower()}",
+    })
+    # Record the dispatch so the Activity Feed links the clip and the gaze x
+    # playback attention-outcome join has its playback side. The orchestrated
+    # runtime replaced the legacy fan-out that was the sole emitter of these.
+    await _log(db, owner, "playback", "dispatched",
+               {"video": url.rsplit("/", 1)[-1], "screen_id": display, "person": owner})
 
 
 async def _log(db, trigger_id: str, event_type: str, status: str, payload: dict) -> None:
