@@ -20,7 +20,7 @@ async def test_round2_renders_two_variants_in_order():
                  synthesize=AsyncMock(return_value=Path("/tmp/a.wav")))
     with patch("src.orchestrator.renderer.select_variants",
                AsyncMock(return_value=[_sel(), _sel()])):
-        urls = await r.render("jason", Round.ROUND2)
+        trigger_id, urls = await r.render("jason", Round.ROUND2)
     assert urls == ["http://c/media/x-0.mp4", "http://c/media/x-1.mp4"]
     assert compose.await_count == 2
 
@@ -35,7 +35,7 @@ async def test_one_failed_variant_does_not_sink_the_others():
                  synthesize=AsyncMock(return_value=Path("/tmp/a.wav")))
     with patch("src.orchestrator.renderer.select_variants",
                AsyncMock(return_value=[_sel(), _sel()])):
-        urls = await r.render("jason", Round.ROUND2)
+        trigger_id, urls = await r.render("jason", Round.ROUND2)
     assert urls == ["u/ok-0.mp4", None]
 
 
@@ -45,6 +45,6 @@ async def test_opener_renders_single_variant():
     r = Renderer(db, http, compose=compose, url_for=lambda p: f"u/{p.name}",
                  synthesize=AsyncMock(return_value=Path("/tmp/a.wav")))
     with patch("src.orchestrator.renderer.select", AsyncMock(return_value=_sel())):
-        urls = await r.render("jason", Round.OPENER)
+        trigger_id, urls = await r.render("jason", Round.OPENER)
     assert urls == ["u/op.mp4"]
     assert compose.await_count == 1

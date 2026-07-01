@@ -92,8 +92,10 @@ def test_orchestrated_play_logs_playback_event():
     db = AsyncMock()
     ws = AsyncMock()
     url = "http://host:8002/media/orch-u1-opener-0.mp4"
+    trigger_id = "3f2a0c9e-1b2c-4d5e-8f90-abcdef012345"  # per-flow uuid, NOT the person
     with patch("main._log", AsyncMock()) as log:
-        asyncio.run(main._dispatch_play(db, ws, "display-2", url, "u1", Round.OPENER))
+        asyncio.run(main._dispatch_play(
+            db, ws, "display-2", url, "u1", Round.OPENER, trigger_id))
 
     # The WS play is still sent to the kiosk (unchanged behavior).
     ws.send_to.assert_awaited_once()
@@ -106,6 +108,10 @@ def test_orchestrated_play_logs_playback_event():
     _db, _trigger_id, event_type, status, payload = log.await_args.args
     assert event_type == "playback"
     assert status == "dispatched"
+    # The event's trigger_id is the per-flow id, NOT the person/owner uuid; the
+    # person is preserved in the payload instead.
+    assert _trigger_id == trigger_id
+    assert _trigger_id != "u1"
     assert payload["video"] == "orch-u1-opener-0.mp4"
     assert payload["screen_id"] == "display-2"
     assert payload["person"] == "u1"
