@@ -10,6 +10,8 @@ def _identity_row(name="Jason", blocked=False):
 
 def _ad_row(slug, base="/assets/standard.mp4"):
     return {
+        "ad_id": f"ad-{slug}",
+        "component_id": f"comp-{slug}",
         "base_video": base,
         "slug": slug,
         "default_props": json.dumps({"color": "#fff"}),

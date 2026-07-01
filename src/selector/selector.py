@@ -22,6 +22,10 @@ class AdSelection:
     overlay_props: dict | None = None
     # Identified person's display name (kiosk debug badge; None for standard).
     person_name: str | None = None
+    # Row UUIDs for God View event emission (ads.id / components.id). None when
+    # no bound custom ad was found (text-overlay fallback / standard).
+    ad_id: str | None = None
+    component_id: str | None = None
 
 
 async def select(trigger: dict, db) -> AdSelection:
@@ -40,7 +44,8 @@ async def select(trigger: dict, db) -> AdSelection:
     tts_text = _TTS_TEMPLATE.format(name=row["name"])
 
     ad = await db.fetchrow(
-        "SELECT a.base_video, c.slug, a.default_props, a.personalized_field "
+        "SELECT a.id AS ad_id, c.id AS component_id, a.base_video, c.slug, "
+        "a.default_props, a.personalized_field "
         "FROM ads a JOIN components c ON c.id = a.component_id "
         "WHERE a.is_active = true AND c.status = 'ready' ORDER BY a.created_at DESC LIMIT 1"
     )
@@ -56,6 +61,8 @@ async def select(trigger: dict, db) -> AdSelection:
             composition_id=f"comp-{ad['slug']}",
             overlay_props=props,
             person_name=row["name"],
+            ad_id=str(ad["ad_id"]) if ad["ad_id"] is not None else None,
+            component_id=str(ad["component_id"]) if ad["component_id"] is not None else None,
         )
 
     return AdSelection(
@@ -79,7 +86,8 @@ async def select_variants(trigger: dict, db, count: int) -> list[AdSelection]:
         return [base]
 
     rows = await db.fetch(
-        "SELECT a.base_video, c.slug, a.default_props, a.personalized_field "
+        "SELECT a.id AS ad_id, c.id AS component_id, a.base_video, c.slug, "
+        "a.default_props, a.personalized_field "
         "FROM ads a JOIN components c ON c.id = a.component_id "
         "WHERE a.is_active = true AND c.status = 'ready' "
         # random per trigger: newest-first starved text-bearing ads on 2-display splits
@@ -111,5 +119,7 @@ async def select_variants(trigger: dict, db, count: int) -> list[AdSelection]:
             composition_id=f"comp-{ad['slug']}",
             overlay_props=props,
             person_name=name,
+            ad_id=str(ad["ad_id"]) if ad["ad_id"] is not None else None,
+            component_id=str(ad["component_id"]) if ad["component_id"] is not None else None,
         ))
     return [variants[i % len(variants)] for i in range(count)]

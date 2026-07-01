@@ -82,7 +82,8 @@ async def test_identified_visitor_gets_active_custom_ad():
     db = AsyncMock()
     db.fetchrow = AsyncMock(side_effect=[
         {"name": "Jason", "is_blocked": False},
-        {"base_video": "/assets/standard.mp4", "slug": "neon",
+        {"ad_id": "ad-neon", "component_id": "comp-neon",
+         "base_video": "/assets/standard.mp4", "slug": "neon",
          "default_props": {"color": "#ff2d2d"}, "personalized_field": "text"},
     ])
     with patch("src.selector.selector._STANDARD_VIDEO", _FAKE_VIDEO):

@@ -103,13 +103,15 @@ def test_orchestrated_play_logs_playback_event():
     assert display_arg == "display-2"
     assert msg["type"] == "play" and msg["video_url"] == url
 
-    # ...and a playback/dispatched event is logged with the clip filename.
-    log.assert_awaited_once()
-    _db, _trigger_id, event_type, status, payload = log.await_args.args
-    assert event_type == "playback"
-    assert status == "dispatched"
+    # ...and a playback/dispatched event is logged with the clip filename. (The
+    # dispatch also emits an ad_run/dispatched transition, so select the playback
+    # call among the logged events.)
+    calls = [c.args for c in log.await_args_list]
+    playback = next(c for c in calls if c[2] == "playback" and c[3] == "dispatched")
+    _db, _trigger_id, event_type, status, payload = playback
     # The event's trigger_id is the per-flow id, NOT the person/owner uuid; the
-    # person is preserved in the payload instead.
+    # person is preserved in the payload instead. Every logged event uses it.
+    assert all(c[1] == trigger_id for c in calls)
     assert _trigger_id == trigger_id
     assert _trigger_id != "u1"
     assert payload["video"] == "orch-u1-opener-0.mp4"

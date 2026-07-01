@@ -1,10 +1,16 @@
 import asyncio
 import logging
+import uuid
 
+from src.events import display_scope, now_iso
 from src.orchestrator.commands import Idle, Play, RenderAhead
 from src.orchestrator.model import Round
 
 logger = logging.getLogger(__name__)
+
+
+async def _noop_emit(*_args, **_kwargs) -> None:
+    return None
 
 
 class OrchestratorRuntime:
@@ -19,12 +25,16 @@ class OrchestratorRuntime:
     shares that render's trigger_id (and never the owner/person uuid).
     """
 
-    def __init__(self, render, send_play, send_idle, arm_watchdog, cancel_watchdog):
+    def __init__(self, render, send_play, send_idle, arm_watchdog, cancel_watchdog,
+                 emit=None):
         self._render = render
         self._send_play = send_play
         self._send_idle = send_idle
         self._arm_watchdog = arm_watchdog
         self._cancel_watchdog = cancel_watchdog
+        # emit(trigger_id, event_type, status, payload) -> awaitable. Defaults to a
+        # no-op so wiring that predates God View emission keeps working.
+        self._emit = emit or _noop_emit
         self._cache: dict[tuple, list] = {}
         self._inflight: dict[tuple, asyncio.Task] = {}
         self._pending: dict[str, tuple] = {}  # display -> (owner, round, slot)
@@ -41,8 +51,29 @@ class OrchestratorRuntime:
                     self._pending.pop(c.display, None)
                     self._cancel_watchdog(c.display)
                     await self._send_idle(c.display)
+                    await self._emit_idle(c.display)
                 elif isinstance(c, Play):
                     await self._play(c)
+
+    async def _emit_idle(self, display) -> None:
+        """E6: an idle segment is an observable playback with a null subject. Mint a
+        fresh uuid4 trigger_id per segment so the God View's UNIQUE(trigger_id) keys
+        never collide across idle rotations."""
+        trigger_id = str(uuid.uuid4())
+        await self._emit(trigger_id, "playback", "dispatched", {
+            **display_scope(display),
+            "trigger_id": trigger_id,
+            "subject_profile_id": None,
+            "ad_id": None,
+            "component_id": None,
+            "personalization_type": "none",
+            "used_spoken_name": False,
+            "used_visible_name": False,
+            "used_likeness": False,
+            "used_voice_clone": False,
+            "media_asset_ref": None,
+            "dispatched_at": now_iso(),
+        })
 
     def _ensure_render(self, owner, rnd) -> None:
         key = (owner, rnd)
