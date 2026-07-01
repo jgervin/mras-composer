@@ -1,7 +1,7 @@
 """E6: every idle segment is an observable playback. When the runtime idles a
-display it mints a fresh uuid4 trigger_id and emits playback/dispatched with a
-null subject and personalization_type='none' so the projector gets an ad_run +
-playback row per idle segment."""
+display it mints a fresh uuid4 trigger_id and emits playback/dispatched (only that
+— an idle segment has no ad_run row) carrying just the canonical playback fields
+so the projector gets a null-subject playback row per idle segment."""
 import uuid
 from unittest.mock import AsyncMock, Mock
 
@@ -31,10 +31,13 @@ async def test_idle_emits_playback_dispatched_with_uuid4_trigger():
     assert payload["trigger_id"] == trigger_id
     assert payload["screen_id"] == "display-1"
     assert payload["screen_kind"] == "display"
-    assert payload["subject_profile_id"] is None
-    assert payload["personalization_type"] == "none"
-    for f in ("used_spoken_name", "used_visible_name", "used_likeness", "used_voice_clone"):
-        assert payload[f] is False
+    # Canonical playback fields only — the ad_run-only fields the projector's
+    # playbacks fold never reads are omitted (an idle segment has no ad_run row).
+    assert payload["media_asset_ref"] is None
+    assert payload["dispatched_at"]
+    for f in ("subject_profile_id", "ad_id", "component_id", "personalization_type",
+              "used_spoken_name", "used_visible_name", "used_likeness", "used_voice_clone"):
+        assert f not in payload
 
 
 async def test_non_idle_commands_do_not_emit():

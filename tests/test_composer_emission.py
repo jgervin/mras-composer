@@ -1,6 +1,9 @@
 """God View emissions from the render lane (Renderer.render) — decision/made,
-composition/rendering, composition/rendered|failed, ad_run/planned. Enum values
-cross-checked against mras-ops 010_enums.sql. Every payload carries screen_kind.
+composition/queued, composition/rendering, composition/rendered|failed,
+ad_run/planned. Enum values cross-checked against mras-ops 010_enums.sql. These
+pre-display events carry the TRIGGER's CAMERA screen_id (screen_kind='camera') so
+the projector resolves system/location/org from the cameras registry — a display
+scope with screen_id=None would leave these rows permanently unscoped.
 """
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -48,18 +51,25 @@ async def test_opener_emits_decision_composition_and_adrun():
     r = _renderer(compose, emit)
     with patch("src.orchestrator.renderer.emit", emit), \
          patch("src.orchestrator.renderer.select", AsyncMock(return_value=_custom_sel())):
-        trigger_id, urls = await r.render("sp1", Round.OPENER)
+        trigger_id, urls = await r.render("sp1", Round.OPENER, "cam-77")
 
     evs = _events(emit)
     kinds = [(et, st) for et, st, _ in evs]
     assert ("decision", "made") in kinds
+    assert ("composition", "queued") in kinds
     assert ("composition", "rendering") in kinds
     assert ("composition", "rendered") in kinds
     assert ("ad_run", "planned") in kinds
 
-    # Every payload carries the display discriminator + a valid trigger_id.
+    # composition/queued opens the composition_runs row before rendering advances it.
+    assert kinds.index(("composition", "queued")) < kinds.index(("composition", "rendering"))
+
+    # These pre-display events carry the CAMERA scope (the triggering camera
+    # screen_id), so the projector can resolve system/location/org — a display
+    # scope with screen_id=None would leave these rows permanently unscoped.
     for et, st, pl in evs:
-        assert pl["screen_kind"] == "display"
+        assert pl["screen_kind"] == "camera"
+        assert pl["screen_id"] == "cam-77"
         assert pl["trigger_id"] == trigger_id
 
     dec = next(pl for et, st, pl in evs if (et, st) == ("decision", "made"))

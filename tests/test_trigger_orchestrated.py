@@ -64,7 +64,7 @@ def test_identified_person_drives_the_orchestrator():
         res = client.post("/trigger", json={"trigger_id": "t1", "uuid": "u1",
                                             "is_new_visitor": False})
         assert res.json()["status"] == "orchestrated"
-        mocks["orch"].on_identify.assert_called_once_with("u1")
+        mocks["orch"].on_identify.assert_called_once_with("u1", "screen_0")
         mocks["runtime"].apply.assert_awaited_once()
         # The old one-shot path is gone — no direct broadcast/send from /trigger.
         mocks["ws"].broadcast.assert_not_awaited()

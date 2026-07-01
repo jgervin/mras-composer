@@ -46,7 +46,7 @@ class OrchestratorRuntime:
         async with self._lock:
             for c in commands:
                 if isinstance(c, RenderAhead):
-                    self._ensure_render(c.owner, c.round)
+                    self._ensure_render(c.owner, c.round, c.screen_id)
                 elif isinstance(c, Idle):
                     self._pending.pop(c.display, None)
                     self._cancel_watchdog(c.display)
@@ -56,26 +56,21 @@ class OrchestratorRuntime:
                     await self._play(c)
 
     async def _emit_idle(self, display) -> None:
-        """E6: an idle segment is an observable playback with a null subject. Mint a
-        fresh uuid4 trigger_id per segment so the God View's UNIQUE(trigger_id) keys
-        never collide across idle rotations."""
+        """E6: an idle segment is an observable playback with a null subject, so it
+        emits playback/dispatched (and only that — an idle segment intentionally has
+        no ad_run row). Mint a fresh uuid4 trigger_id per segment so the God View's
+        UNIQUE(trigger_id) keys never collide across idle rotations. The payload
+        carries only the canonical playback fields the projector's playbacks fold
+        reads (the ad_run-only fields it never reads are omitted)."""
         trigger_id = str(uuid.uuid4())
         await self._emit(trigger_id, "playback", "dispatched", {
             **display_scope(display),
             "trigger_id": trigger_id,
-            "subject_profile_id": None,
-            "ad_id": None,
-            "component_id": None,
-            "personalization_type": "none",
-            "used_spoken_name": False,
-            "used_visible_name": False,
-            "used_likeness": False,
-            "used_voice_clone": False,
             "media_asset_ref": None,
             "dispatched_at": now_iso(),
         })
 
-    def _ensure_render(self, owner, rnd) -> None:
+    def _ensure_render(self, owner, rnd, screen_id=None) -> None:
         key = (owner, rnd)
         if key in self._cache or key in self._inflight:
             return
@@ -83,7 +78,7 @@ class OrchestratorRuntime:
         async def run():
             try:
                 # render returns (trigger_id, urls); cache both together.
-                self._cache[key] = await self._render(owner, rnd)
+                self._cache[key] = await self._render(owner, rnd, screen_id)
                 await self._resume_pending(owner, rnd)
             except Exception:
                 # Never let a render failure become an unretrieved task exception.
@@ -115,7 +110,7 @@ class OrchestratorRuntime:
             self._pending[c.display] = (c.owner, c.round, c.pair_slot)
             await self._send_idle(c.display)
             self._arm_watchdog(c.display)
-            self._ensure_render(c.owner, c.round)
+            self._ensure_render(c.owner, c.round, c.screen_id)
 
     async def _resume_pending(self, owner, rnd) -> None:
         trigger_id, urls = self._cache[(owner, rnd)]

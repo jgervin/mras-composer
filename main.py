@@ -297,7 +297,7 @@ async def trigger_endpoint(body: TriggerPayload):
     # 2, idle freed displays). The orchestrator owns the display wall — display
     # splitting, round sequencing and rendering live in the orchestrator/runtime
     # (advanced by kiosk clip_ended + the watchdog), not in this one-shot path.
-    cmds = app.state.orchestrator.on_identify(subject)
+    cmds = app.state.orchestrator.on_identify(subject, body.screen_id)
     await app.state.runtime.apply(cmds)
     await _log(app.state.db, body.trigger_id, "composition", "orchestrated",
                {"uuid": subject})
@@ -450,10 +450,11 @@ async def _dispatch_play(db, ws, display, url, owner, rnd, trigger_id) -> None:
     })
     # ad_run status transition planned -> dispatched (same trigger_id row; the
     # projector merges this onto the ad_run/planned row opened by the renderer).
+    # started_at is intentionally NOT set here — it means "playback started" and is
+    # set by ad_run/playing; the dispatch clock is not the playback-start clock.
     await _log(db, trigger_id, "ad_run", "dispatched", {
         **display_scope(display),
         "trigger_id": trigger_id,
-        "started_at": dispatched_at,
     })
 
 

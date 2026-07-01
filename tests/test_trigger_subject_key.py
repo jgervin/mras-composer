@@ -52,7 +52,7 @@ def test_subject_profile_id_is_the_orchestrated_subject():
                                             "subject_profile_id": "sp1",
                                             "is_new_visitor": False})
         assert res.json()["status"] == "orchestrated"
-        mocks["orch"].on_identify.assert_called_once_with("sp1")
+        mocks["orch"].on_identify.assert_called_once_with("sp1", "screen_0")
     finally:
         _stop(client, mocks)
 
@@ -65,6 +65,6 @@ def test_legacy_uuid_still_accepted_when_no_subject_profile_id():
         res = client.post("/trigger", json={"trigger_id": "t1", "uuid": "u9",
                                             "is_new_visitor": False})
         assert res.json()["status"] == "orchestrated"
-        mocks["orch"].on_identify.assert_called_once_with("u9")
+        mocks["orch"].on_identify.assert_called_once_with("u9", "screen_0")
     finally:
         _stop(client, mocks)

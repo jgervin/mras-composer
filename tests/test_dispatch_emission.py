@@ -40,7 +40,8 @@ def test_dispatch_emits_enriched_playback_and_ad_run_dispatched():
     assert ar["screen_kind"] == "display"
     assert ar["screen_id"] == "display-2"
     assert ar["trigger_id"] == trigger_id
-    assert ar["started_at"]
+    # started_at means "playback started" — set by ad_run/playing, NOT at dispatch.
+    assert "started_at" not in ar
 
     # trigger_id threaded as the events.trigger_id arg on BOTH, never the person uuid
     for c in log.await_args_list:

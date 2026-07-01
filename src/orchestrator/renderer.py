@@ -4,7 +4,7 @@ import os
 import time
 import uuid
 
-from src.events import display_scope, emit, now_iso
+from src.events import camera_scope, emit, now_iso
 from src.orchestrator.model import Round
 from src.selector.selector import select, select_variants
 
@@ -60,7 +60,7 @@ class Renderer:
         self._url_for = url_for          # Path -> str
         self._synthesize = synthesize    # (text, uuid, voice_id, http) -> Path | None
 
-    async def render(self, owner: str, rnd: Round) -> tuple:
+    async def render(self, owner: str, rnd: Round, trigger_screen_id=None) -> tuple:
         trigger = {"uuid": owner, "is_new_visitor": False}
         if rnd == Round.OPENER:
             selections = [await select(trigger, self._db)]
@@ -76,14 +76,15 @@ class Renderer:
 
         # --- God View decision lane ---------------------------------------------
         # One decision/made per selected ad (personalization_decisions is keyed on
-        # event_id, so N selections = N decision rows). The render lane is display-
-        # agnostic (one render fans to N displays), so screen_id is None here; the
-        # display-lane playback event carries the concrete display and lets the
-        # projector back-stamp scope onto the row sharing this trigger_id.
+        # event_id, so N selections = N decision rows). The render lane has no
+        # concrete display yet, so these pre-display events carry the TRIGGER's
+        # CAMERA screen_id — the projector resolves system/location/org from the
+        # cameras registry. (Only this event ever bears the decision row's id, so if
+        # it landed unscoped the row could never be rescoped, even on a rebuild.)
         audio_present = audio is not None
         for sel in selections:
             await emit(self._db, trigger_id, "decision", "made", {
-                **display_scope(None),
+                **camera_scope(trigger_screen_id),
                 "trigger_id": trigger_id,
                 "decision_type": _decision_type(sel),
                 "selected_ad_id": sel.ad_id,
@@ -96,15 +97,24 @@ class Renderer:
         # composition_runs / ad_runs are keyed UNIQUE(trigger_id): one row per render.
         head = selections[0]
         flags = _used_flags(head, audio_present)
+        # composition/queued opens the composition_runs row (upsert on trigger_id)
+        # BEFORE work starts; rendering/rendered advance the same row. Without it the
+        # 'queued' lifecycle stage is never observed.
+        await emit(self._db, trigger_id, "composition", "queued", {
+            **camera_scope(trigger_screen_id), "trigger_id": trigger_id,
+            "ad_id": head.ad_id, "component_id": head.component_id,
+            "render_mode": _render_mode(head), **flags,
+            "variant_count": len(selections),
+        })
         started_at = now_iso()
         await emit(self._db, trigger_id, "composition", "rendering", {
-            **display_scope(None), "trigger_id": trigger_id,
+            **camera_scope(trigger_screen_id), "trigger_id": trigger_id,
             "ad_id": head.ad_id, "component_id": head.component_id,
             "render_mode": _render_mode(head), **flags,
             "variant_count": len(selections), "started_at": started_at,
         })
         await emit(self._db, trigger_id, "ad_run", "planned", {
-            **display_scope(None), "trigger_id": trigger_id,
+            **camera_scope(trigger_screen_id), "trigger_id": trigger_id,
             "ad_id": head.ad_id,
             "target_subject_profile_id": head.person_uuid,
             "personalization_type": _personalization_type(flags), **flags,
@@ -132,7 +142,7 @@ class Renderer:
         latency_ms = int((time.monotonic() - t0) * 1000)
         if failed == len(selections):
             await emit(self._db, trigger_id, "composition", "failed", {
-                **display_scope(None), "trigger_id": trigger_id,
+                **camera_scope(trigger_screen_id), "trigger_id": trigger_id,
                 "ad_id": head.ad_id, "component_id": head.component_id,
                 "render_mode": _render_mode(head), **flags,
                 "error_code": "ALL_VARIANTS_FAILED",
@@ -142,7 +152,7 @@ class Renderer:
             })
         else:
             await emit(self._db, trigger_id, "composition", "rendered", {
-                **display_scope(None), "trigger_id": trigger_id,
+                **camera_scope(trigger_screen_id), "trigger_id": trigger_id,
                 "ad_id": head.ad_id, "component_id": head.component_id,
                 "render_mode": _render_mode(head), **flags,
                 "failed_variant_count": failed, "variant_count": len(selections),
