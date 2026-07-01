@@ -9,10 +9,14 @@ logger = logging.getLogger(__name__)
 
 class OrchestratorRuntime:
     """Maps the pure core's commands to real I/O. Injected deps:
-      render(owner, round) -> awaitable[list[str]]  (opener: 1 URL, round2: 2 URLs)
-      send_play(display, url, owner, round) -> awaitable
+      render(owner, round) -> awaitable[(trigger_id, list[str])]  (opener: 1 URL, round2: 2 URLs)
+      send_play(display, url, owner, round, trigger_id) -> awaitable
       send_idle(display) -> awaitable
       arm_watchdog(display) / cancel_watchdog(display) -> None
+
+    The render's trigger_id (the per-flow id for that composition) is cached with
+    its URLs and threaded to send_play, so every playback dispatched off one render
+    shares that render's trigger_id (and never the owner/person uuid).
     """
 
     def __init__(self, render, send_play, send_idle, arm_watchdog, cancel_watchdog):
@@ -47,6 +51,7 @@ class OrchestratorRuntime:
 
         async def run():
             try:
+                # render returns (trigger_id, urls); cache both together.
                 self._cache[key] = await self._render(owner, rnd)
                 await self._resume_pending(owner, rnd)
             except Exception:
@@ -60,8 +65,9 @@ class OrchestratorRuntime:
         self._inflight[key] = asyncio.create_task(run())
 
     async def _play(self, c: Play) -> None:
-        urls = self._cache.get((c.owner, c.round))
-        if urls is not None:
+        entry = self._cache.get((c.owner, c.round))
+        if entry is not None:
+            trigger_id, urls = entry
             self._pending.pop(c.display, None)
             url = urls[min(c.pair_slot, len(urls) - 1)]
             if url is None:
@@ -69,7 +75,7 @@ class OrchestratorRuntime:
                 # arm the watchdog so the program still advances (clip_ended fires).
                 await self._send_idle(c.display)
             else:
-                await self._send_play(c.display, url, c.owner, c.round)
+                await self._send_play(c.display, url, c.owner, c.round, trigger_id)
             self._arm_watchdog(c.display)
         else:
             # render-gap: idle now, resume this display when the render lands. Arm the
@@ -81,7 +87,7 @@ class OrchestratorRuntime:
             self._ensure_render(c.owner, c.round)
 
     async def _resume_pending(self, owner, rnd) -> None:
-        urls = self._cache[(owner, rnd)]
+        trigger_id, urls = self._cache[(owner, rnd)]
         for display, (o, r, slot) in list(self._pending.items()):
             if (o, r) == (owner, rnd):
                 del self._pending[display]
@@ -89,7 +95,7 @@ class OrchestratorRuntime:
                 if url is None:
                     await self._send_idle(display)
                 else:
-                    await self._send_play(display, url, owner, rnd)
+                    await self._send_play(display, url, owner, rnd, trigger_id)
                 self._arm_watchdog(display)
 
     async def drain(self) -> None:

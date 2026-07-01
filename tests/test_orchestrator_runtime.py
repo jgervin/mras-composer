@@ -7,8 +7,10 @@ from src.orchestrator.model import Round
 
 
 def _runtime(render=None):
+    # render returns (trigger_id, urls); the runtime caches both and threads the
+    # trigger_id through to send_play.
     return OrchestratorRuntime(
-        render=render or AsyncMock(return_value=["urlA", "urlB"]),
+        render=render or AsyncMock(return_value=("tid-def", ["urlA", "urlB"])),
         send_play=AsyncMock(),
         send_idle=AsyncMock(),
         arm_watchdog=Mock(),
@@ -17,11 +19,11 @@ def _runtime(render=None):
 
 
 async def test_render_ahead_populates_cache_without_sending():
-    rt = _runtime(render=AsyncMock(return_value=["a", "b"]))
+    rt = _runtime(render=AsyncMock(return_value=("tid-ra", ["a", "b"])))
     await rt.apply([RenderAhead("jason", Round.ROUND2)])
     # the render task is in-flight; await it to settle
     await rt.drain()
-    assert rt._cache[("jason", Round.ROUND2)] == ["a", "b"]
+    assert rt._cache[("jason", Round.ROUND2)] == ("tid-ra", ["a", "b"])
     rt._send_play.assert_not_awaited()
 
 
@@ -34,22 +36,23 @@ async def test_idle_sends_idle_and_cancels_watchdog():
 
 async def test_play_with_cached_render_sends_play_and_arms_watchdog():
     rt = _runtime()
-    rt._cache[("jason", Round.ROUND2)] = ["urlA", "urlB"]
+    rt._cache[("jason", Round.ROUND2)] = ("tid-1", ["urlA", "urlB"])
     await rt.apply([Play("display-3", "jason", Round.ROUND2, 1)])  # slot 1 → urlB
-    rt._send_play.assert_awaited_once_with("display-3", "urlB", "jason", Round.ROUND2)
+    rt._send_play.assert_awaited_once_with("display-3", "urlB", "jason", Round.ROUND2, "tid-1")
     rt._arm_watchdog.assert_called_once_with("display-3")
     rt._send_idle.assert_not_awaited()
 
 
 async def test_play_opener_uses_single_cached_url_regardless_of_slot():
     rt = _runtime()
-    rt._cache[("jason", Round.OPENER)] = ["opener_url"]
+    rt._cache[("jason", Round.OPENER)] = ("tid-op", ["opener_url"])
     await rt.apply([Play("display-1", "jason", Round.OPENER, 0)])
-    rt._send_play.assert_awaited_once_with("display-1", "opener_url", "jason", Round.OPENER)
+    rt._send_play.assert_awaited_once_with(
+        "display-1", "opener_url", "jason", Round.OPENER, "tid-op")
 
 
 async def test_play_on_miss_idles_then_resumes_when_render_completes():
-    render = AsyncMock(return_value=["renderedA", "renderedB"])
+    render = AsyncMock(return_value=("tid-miss", ["renderedA", "renderedB"]))
     rt = _runtime(render=render)
     await rt.apply([Play("display-2", "jason", Round.ROUND2, 0)])
     # no cache yet → idle now, render kicked off. The watchdog is armed on the
@@ -58,7 +61,8 @@ async def test_play_on_miss_idles_then_resumes_when_render_completes():
     rt._send_play.assert_not_awaited()
     rt._arm_watchdog.assert_called_once_with("display-2")
     await rt.drain()  # let the render task finish → it resumes the pending display
-    rt._send_play.assert_awaited_once_with("display-2", "renderedA", "jason", Round.ROUND2)
+    rt._send_play.assert_awaited_once_with(
+        "display-2", "renderedA", "jason", Round.ROUND2, "tid-miss")
     # re-armed on the actual play
     assert rt._arm_watchdog.call_count == 2
 
@@ -67,7 +71,7 @@ async def test_failed_variant_slot_idles_and_arms_watchdog_to_advance():
     # A cached render whose slot is None (that variant failed) must NOT wedge the
     # display: idle it and arm the watchdog so the program still advances.
     rt = _runtime()
-    rt._cache[("jason", Round.ROUND2)] = ["urlA", None]
+    rt._cache[("jason", Round.ROUND2)] = ("tid-f", ["urlA", None])
     await rt.apply([Play("display-4", "jason", Round.ROUND2, 1)])  # slot 1 → None
     rt._send_idle.assert_awaited_once_with("display-4")
     rt._send_play.assert_not_awaited()
@@ -76,9 +80,9 @@ async def test_failed_variant_slot_idles_and_arms_watchdog_to_advance():
 
 async def test_one_failed_slot_still_plays_the_surviving_slot():
     rt = _runtime()
-    rt._cache[("jason", Round.ROUND2)] = ["urlA", None]
+    rt._cache[("jason", Round.ROUND2)] = ("tid-s", ["urlA", None])
     await rt.apply([Play("display-3", "jason", Round.ROUND2, 0)])  # slot 0 → urlA
-    rt._send_play.assert_awaited_once_with("display-3", "urlA", "jason", Round.ROUND2)
+    rt._send_play.assert_awaited_once_with("display-3", "urlA", "jason", Round.ROUND2, "tid-s")
     rt._arm_watchdog.assert_called_once_with("display-3")
     rt._send_idle.assert_not_awaited()
 

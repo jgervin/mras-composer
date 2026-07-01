@@ -131,8 +131,8 @@ async def lifespan(app: FastAPI):
         synthesize=synthesize,
     )
 
-    async def _send_play(display, url, owner, rnd):
-        await _dispatch_play(app.state.db, app.state.ws, display, url, owner, rnd)
+    async def _send_play(display, url, owner, rnd, trigger_id):
+        await _dispatch_play(app.state.db, app.state.ws, display, url, owner, rnd, trigger_id)
 
     async def _send_idle(display):
         await app.state.ws.send_to(display, {"type": "idle"})
@@ -402,7 +402,7 @@ def health():
     return {"status": "ok"}
 
 
-async def _dispatch_play(db, ws, display, url, owner, rnd) -> None:
+async def _dispatch_play(db, ws, display, url, owner, rnd, trigger_id) -> None:
     # `ad` drives the kiosk debug badge label. The renderer doesn't surface the
     # selected ad's identifier through the runtime (plumbing it through the URL
     # cache is disproportionate for a debug-only field), so send a best-effort
@@ -414,7 +414,10 @@ async def _dispatch_play(db, ws, display, url, owner, rnd) -> None:
     # Record the dispatch so the Activity Feed links the clip and the gaze x
     # playback attention-outcome join has its playback side. The orchestrated
     # runtime replaced the legacy fan-out that was the sole emitter of these.
-    await _log(db, owner, "playback", "dispatched",
+    # trigger_id is the per-flow id minted by the renderer for THIS composition —
+    # NOT the owner/person uuid (person is carried in the payload instead), so the
+    # God View's UNIQUE(trigger_id) / UNIQUE(trigger_id, display_id) hold.
+    await _log(db, trigger_id, "playback", "dispatched",
                {"video": url.rsplit("/", 1)[-1], "screen_id": display, "person": owner})
 
 
