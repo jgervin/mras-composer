@@ -92,3 +92,63 @@ async def test_identified_visitor_gets_active_custom_ad():
     assert result.composition_id == "comp-neon"
     assert result.overlay_props["text"] == "Jason"
     assert result.overlay_props["color"] == "#ff2d2d"
+
+
+# ---------------------------------------------------------------------------
+# God View schema migration: subject_profiles replaces identities
+# RED before fix (queries identities → exception); GREEN after fix.
+# ---------------------------------------------------------------------------
+
+_SUBJECT_UUID = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+
+
+async def test_subject_profile_personalized_text_overlay_no_ads():
+    """Known subject_profiles row + no ads → text-overlay fallback, personalized.
+    RED: current selector queries identities (deleted table) → UndefinedTableError.
+    GREEN: after fix queries subject_profiles → overlay_text and person_name set."""
+
+    async def _fetchrow(q, *args):
+        if "identities" in q:
+            raise Exception('relation "identities" does not exist')
+        if "subject_profiles" in q:
+            # Simulates: id=_SUBJECT_UUID, display_name='Jason Ervin', status='known'
+            return {"name": "Jason Ervin", "is_blocked": False}
+        return None  # ads query → None → text-overlay fallback path (lines 68-75)
+
+    db = AsyncMock()
+    db.fetchrow = AsyncMock(side_effect=_fetchrow)
+
+    with patch("src.selector.selector._STANDARD_VIDEO", _FAKE_VIDEO), \
+         patch("src.selector.selector._OVERLAY_TEMPLATE", "{name}"):
+        result = await select({"uuid": _SUBJECT_UUID, "is_new_visitor": False}, db)
+
+    assert result.type == "personalized"
+    assert result.overlay_text == "Jason Ervin"
+    assert result.person_name == "Jason Ervin"
+
+
+async def test_new_visitor_flag_returns_standard_regardless_of_subject_profile():
+    """is_new_visitor=True → standard; fetchrow never called (no schema involved)."""
+    db = AsyncMock()
+    with patch("src.selector.selector._STANDARD_VIDEO", _FAKE_VIDEO):
+        result = await select({"uuid": _SUBJECT_UUID, "is_new_visitor": True}, db)
+    assert result.type == "standard"
+    db.fetchrow.assert_not_called()
+
+
+async def test_unknown_subject_profile_id_returns_standard():
+    """subject_profiles row not found → standard.
+    RED: current selector queries identities → exception.
+    GREEN: after fix queries subject_profiles → None → standard."""
+
+    async def _fetchrow(q, *args):
+        if "identities" in q:
+            raise Exception('relation "identities" does not exist')
+        return None  # subject_profiles: id not found
+
+    db = AsyncMock()
+    db.fetchrow = AsyncMock(side_effect=_fetchrow)
+
+    with patch("src.selector.selector._STANDARD_VIDEO", _FAKE_VIDEO):
+        result = await select({"uuid": "no-such-profile-id", "is_new_visitor": False}, db)
+    assert result.type == "standard"

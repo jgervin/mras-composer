@@ -36,7 +36,7 @@ async def select(trigger: dict, db) -> AdSelection:
         return std
 
     row = await db.fetchrow(
-        "SELECT name, is_blocked FROM identities WHERE uuid = $1", person_uuid
+        "SELECT display_name AS name, false AS is_blocked FROM subject_profiles WHERE id = $1::uuid", person_uuid
     )
     if row is None or row["is_blocked"]:
         return std
@@ -98,7 +98,7 @@ async def select_variants(trigger: dict, db, count: int) -> list[AdSelection]:
         return [base] * count
 
     identity = await db.fetchrow(
-        "SELECT name, is_blocked FROM identities WHERE uuid = $1", trigger["uuid"]
+        "SELECT display_name AS name, false AS is_blocked FROM subject_profiles WHERE id = $1::uuid", trigger["uuid"]
     )
     if identity is None:
         # Identity vanished between select() and here — degrade, don't 500.
