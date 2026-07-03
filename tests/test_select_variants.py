@@ -106,7 +106,7 @@ async def test_name_nulled_mid_flight_falls_back_instead_of_personalizing_none()
     out = await select_variants(_trigger(), db, count=2)
     assert len(out) == 2
     assert all(s.person_name == "Jason" for s in out)  # base selection, not the NULL re-fetch
-    assert all(s.composition_id is None for s in out)  # legacy fallback, not variants
+    assert all(s.overlay_props["text"] == "Jason" for s in out)
 
 
 async def test_refetch_query_filters_on_known_status():

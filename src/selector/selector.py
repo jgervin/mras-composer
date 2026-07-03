@@ -1,5 +1,6 @@
 import json
 import os
+import uuid as uuidlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -35,10 +36,22 @@ async def select(trigger: dict, db) -> AdSelection:
     if not person_uuid or trigger.get("is_new_visitor", True):
         return std
 
+    try:
+        uuidlib.UUID(person_uuid)
+    except (ValueError, TypeError):
+        # Garbage trigger uuid: degrade to standard instead of letting
+        # asyncpg's $1::uuid cast raise mid-playback.
+        return std
+
+    # status = 'known': enrollment writes it explicitly; anonymous/merged/
+    # deleted profiles must not personalize with a stale (or NULL) name.
+    # false AS is_blocked: blocklist deferred to production go-live (see blocklist_entries).
     row = await db.fetchrow(
-        "SELECT display_name AS name, false AS is_blocked FROM subject_profiles WHERE id = $1::uuid", person_uuid
+        "SELECT display_name AS name, false AS is_blocked FROM subject_profiles "
+        "WHERE id = $1::uuid AND status = 'known'", person_uuid
     )
-    if row is None or row["is_blocked"]:
+    # display_name is nullable even on known rows — a falsy name degrades too.
+    if row is None or not row["name"] or row["is_blocked"]:
         return std
 
     tts_text = _TTS_TEMPLATE.format(name=row["name"])
@@ -97,11 +110,15 @@ async def select_variants(trigger: dict, db, count: int) -> list[AdSelection]:
     if not rows:
         return [base] * count
 
+    # Same predicate + guard as select(); false AS is_blocked: blocklist
+    # deferred to production go-live (see blocklist_entries).
     identity = await db.fetchrow(
-        "SELECT display_name AS name, false AS is_blocked FROM subject_profiles WHERE id = $1::uuid", trigger["uuid"]
+        "SELECT display_name AS name, false AS is_blocked FROM subject_profiles "
+        "WHERE id = $1::uuid AND status = 'known'", trigger["uuid"]
     )
-    if identity is None:
-        # Identity vanished between select() and here — degrade, don't 500.
+    if identity is None or not identity["name"]:
+        # Identity vanished (or name NULLed) between select() and here —
+        # degrade to the base selection, don't 500 or greet "None".
         return [base] * count
     name = identity["name"]
     tts_text = _TTS_TEMPLATE.format(name=name)
