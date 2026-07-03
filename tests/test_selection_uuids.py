@@ -18,7 +18,7 @@ async def test_custom_ad_selection_carries_ad_and_component_uuids():
          "default_props": {"color": "#ff2d2d"}, "personalized_field": "text"},
     ])
     with patch("src.selector.selector._STANDARD_VIDEO", _FAKE_VIDEO):
-        result = await select({"uuid": "uuid-abc", "is_new_visitor": False}, db)
+        result = await select({"uuid": "11111111-1111-1111-1111-111111111111", "is_new_visitor": False}, db)
     assert result.type == "personalized"
     assert result.ad_id == "ad-uuid-1"
     assert result.component_id == "comp-uuid-9"
@@ -28,7 +28,7 @@ async def test_text_fallback_selection_has_null_uuids():
     db = AsyncMock()
     db.fetchrow = AsyncMock(side_effect=[{"name": "Jason", "is_blocked": False}, None])
     with patch("src.selector.selector._STANDARD_VIDEO", _FAKE_VIDEO):
-        result = await select({"uuid": "uuid-abc", "is_new_visitor": False}, db)
+        result = await select({"uuid": "11111111-1111-1111-1111-111111111111", "is_new_visitor": False}, db)
     assert result.type == "personalized"
     assert result.ad_id is None
     assert result.component_id is None
