@@ -3,6 +3,7 @@ import pytest
 
 from src.orchestrator.runtime import OrchestratorRuntime
 from src.orchestrator.commands import Idle, Play, RenderAhead
+from src.orchestrator.core import Orchestrator
 from src.orchestrator.model import Round
 
 
@@ -97,3 +98,40 @@ async def test_render_task_exception_does_not_raise_and_clears_inflight():
     await rt.drain()  # render task raises internally but is caught (no unretrieved exc)
     assert rt._inflight == {}
     rt._send_play.assert_not_awaited()
+
+
+async def test_repeat_visit_after_done_does_not_replay_prior_trigger_id():
+    # issue #27: the runtime cache is keyed (owner, round) and Round values repeat
+    # across programs, so when a subject's program completes (DONE) and the same
+    # person re-triggers later, the core mints a FRESH program but the runtime
+    # replays the previous visit's cached render — wrong trigger_id (breaks God
+    # View playback↔ad_run linkage) and stale content. The new program's opener
+    # must be a fresh render with a fresh trigger_id.
+    calls = []
+
+    async def render(owner, rnd, screen_id=None):
+        calls.append((owner, rnd))
+        n = calls.count((owner, rnd))
+        return (f"tid-{rnd.name}-{n}", [f"urlA-{rnd.name}-{n}", f"urlB-{rnd.name}-{n}"])
+
+    core = Orchestrator(["display-1"], clock=lambda: 0.0)
+    rt = _runtime(render=render)
+
+    # visit 1: opener (cache-miss → render) → round 2 → DONE
+    await rt.apply(core.on_identify("jason"))
+    await rt.drain()
+    await rt.apply(core.on_clip_ended("display-1"))  # opener ended → round 2
+    await rt.drain()
+    await rt.apply(core.on_clip_ended("display-1"))  # round 2 ended → DONE → idle
+    await rt.drain()
+
+    # visit 2: same person re-triggers → core starts a FRESH program (opener)
+    await rt.apply(core.on_identify("jason"))
+    await rt.drain()
+
+    # a fresh opener render was requested (cache miss, not a stale-cache replay)
+    assert calls.count(("jason", Round.OPENER)) == 2
+    # and the dispatched opener carries the fresh render's trigger_id
+    opener_dispatches = [args for (args, _kw) in rt._send_play.await_args_list
+                         if args[3] == Round.OPENER]
+    assert opener_dispatches[-1][4] == "tid-OPENER-2"
