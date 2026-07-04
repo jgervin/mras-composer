@@ -13,7 +13,7 @@ import httpx
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 from src.assembly.assembler import _INSERT_MIN_OFFSET_MS, assemble
 from src.db import create_pool
@@ -214,7 +214,11 @@ class TriggerPayload(BaseModel):
 
 
 class PresencePerson(BaseModel):
-    uuid: str
+    # Vision's presence reporter posts `subject_profile_id` (God View naming);
+    # accept it as the primary wire key while keeping legacy `uuid` working.
+    model_config = ConfigDict(populate_by_name=True)
+
+    uuid: str = Field(validation_alias=AliasChoices("subject_profile_id", "uuid"))
     first_seen: str | None = None
 
 
