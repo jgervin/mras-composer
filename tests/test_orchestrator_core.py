@@ -1,4 +1,4 @@
-from src.orchestrator.commands import Play, Idle, RenderAhead
+from src.orchestrator.commands import EvictRender, Play, Idle, RenderAhead
 from src.orchestrator.model import Round
 from src.orchestrator.core import Orchestrator
 
@@ -68,6 +68,18 @@ def test_program_caps_at_round2_then_idles_no_round3():
     cmds = o.on_clip_ended("display-1")    # round 2 ends → DONE → idle (NOT round 3)
     assert Idle("display-1") in cmds
     assert not any(isinstance(c, Play) for c in cmds)  # no round 3 play
+
+
+def test_program_done_evicts_owner_renders_but_mid_program_does_not():
+    # issue #27: the DONE boundary must tell the runtime to drop the owner's
+    # cached renders; mid-program round advances must NOT (round 2 reuses the
+    # render-ahead cache by design).
+    o = _orch(displays=("display-1",))
+    o.on_identify("jason")                       # opener on d1
+    mid = o.on_clip_ended("display-1")           # → round 2 (mid-program)
+    assert not any(isinstance(c, EvictRender) for c in mid)
+    done = o.on_clip_ended("display-1")          # round 2 ends → DONE
+    assert EvictRender("jason") in done
 
 
 def test_clip_ended_for_unknown_display_returns_empty():
