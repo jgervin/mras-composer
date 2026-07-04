@@ -3,7 +3,7 @@ import logging
 import uuid
 
 from src.events import display_scope, now_iso
-from src.orchestrator.commands import Idle, Play, RenderAhead
+from src.orchestrator.commands import EvictRender, Idle, Play, RenderAhead
 from src.orchestrator.model import Round
 
 logger = logging.getLogger(__name__)
@@ -54,6 +54,8 @@ class OrchestratorRuntime:
                     await self._emit_idle(c.display)
                 elif isinstance(c, Play):
                     await self._play(c)
+                elif isinstance(c, EvictRender):
+                    self._evict(c.owner)
 
     async def _emit_idle(self, display) -> None:
         """E6: an idle segment is an observable playback with a null subject, so it
@@ -69,6 +71,16 @@ class OrchestratorRuntime:
             "media_asset_ref": None,
             "dispatched_at": now_iso(),
         })
+
+    def _evict(self, owner) -> None:
+        """Program boundary (DONE): drop the owner's cached renders and cancel any
+        still-in-flight ones (a late-landing render would otherwise repopulate the
+        cache), so a future fresh program for the same subject always gets a fresh
+        render — never a prior visit's trigger_id (issue #27)."""
+        for key in [k for k in self._cache if k[0] == owner]:
+            del self._cache[key]
+        for key in [k for k in self._inflight if k[0] == owner]:
+            self._inflight.pop(key).cancel()
 
     def _ensure_render(self, owner, rnd, screen_id=None) -> None:
         key = (owner, rnd)

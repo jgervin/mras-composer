@@ -1,8 +1,9 @@
+import asyncio
 from unittest.mock import AsyncMock, Mock
 import pytest
 
 from src.orchestrator.runtime import OrchestratorRuntime
-from src.orchestrator.commands import Idle, Play, RenderAhead
+from src.orchestrator.commands import EvictRender, Idle, Play, RenderAhead
 from src.orchestrator.core import Orchestrator
 from src.orchestrator.model import Round
 
@@ -98,6 +99,36 @@ async def test_render_task_exception_does_not_raise_and_clears_inflight():
     await rt.drain()  # render task raises internally but is caught (no unretrieved exc)
     assert rt._inflight == {}
     rt._send_play.assert_not_awaited()
+
+
+async def test_evict_render_drops_only_that_owners_cache_entries():
+    rt = _runtime()
+    rt._cache[("jason", Round.OPENER)] = ("tid-jo", ["u"])
+    rt._cache[("jason", Round.ROUND2)] = ("tid-jr", ["a", "b"])
+    rt._cache[("maria", Round.OPENER)] = ("tid-mo", ["u"])
+    await rt.apply([EvictRender("jason")])
+    assert ("jason", Round.OPENER) not in rt._cache
+    assert ("jason", Round.ROUND2) not in rt._cache
+    assert rt._cache[("maria", Round.OPENER)] == ("tid-mo", ["u"])
+
+
+async def test_evict_render_cancels_inflight_render_so_it_cannot_repopulate_cache():
+    # A render still in flight at the program boundary would land AFTER the
+    # eviction and resurrect the stale entry — it must be cancelled instead.
+    started = asyncio.Event()
+
+    async def slow_render(owner, rnd, screen_id=None):
+        started.set()
+        await asyncio.sleep(3600)
+        return ("tid-slow", ["u"])
+
+    rt = _runtime(render=slow_render)
+    await rt.apply([RenderAhead("jason", Round.ROUND2)])
+    await started.wait()
+    await rt.apply([EvictRender("jason")])
+    await asyncio.sleep(0)  # let the cancellation finalize the render task
+    assert rt._inflight == {}
+    assert ("jason", Round.ROUND2) not in rt._cache
 
 
 async def test_repeat_visit_after_done_does_not_replay_prior_trigger_id():

@@ -1,7 +1,7 @@
 import time
 from dataclasses import dataclass
 
-from src.orchestrator.commands import Idle, Play, RenderAhead
+from src.orchestrator.commands import EvictRender, Idle, Play, RenderAhead
 from src.orchestrator.model import Round, even_split, next_round, pair_slot
 
 
@@ -57,6 +57,10 @@ class Orchestrator:
                 and self._programs[owner].round == sc.round:
             # first display of this owner to finish the current round → advance
             self._programs[owner].round = next_round(self._programs[owner].round)
+            if self._programs[owner].round == Round.DONE:
+                # program boundary: evict the owner's cached renders so a later
+                # fresh program can't replay a stale trigger_id (issue #27)
+                return [EvictRender(owner)] + self._reassign()
         return self._reassign()
 
     def on_presence(self, uuids: list[str]) -> list:

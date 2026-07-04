@@ -28,3 +28,11 @@ class RenderAhead:
     round: Round
     # Triggering camera screen_id (for render-lane scope).
     screen_id: str | None = None
+
+
+@dataclass(frozen=True)
+class EvictRender:
+    """Drop an owner's cached and in-flight renders at their program boundary
+    (round reaches DONE), so a later fresh program for the same subject can
+    never replay a prior render's trigger_id (issue #27)."""
+    owner: str
