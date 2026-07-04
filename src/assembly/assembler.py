@@ -43,14 +43,19 @@ def _video_filter(overlay_inserts: list[tuple[Path, int, int]], start_index: int
 
 def _audio_filter(offsets: list[int]) -> str:
     """Build the ffmpeg audio graph: each inserted track (inputs 1..N) is delayed by
-    its mark (floored at _INSERT_MIN_OFFSET_MS) and mixed over the base audio (input 0)."""
+    its mark (floored at _INSERT_MIN_OFFSET_MS) and mixed over the base audio (input 0).
+    `normalize=0` disables amix's default 1/N input scaling, which halved the whole
+    personalized clip (-6dB vs idle ads playing the same base at full volume). The base
+    peaks near full scale (measured max_volume -0.4dB), so the voice summed on top can
+    clip; `alimiter` caps the mix instead. Requires ffmpeg >= 4.4 for amix normalize."""
     parts: list[str] = []
     labels = ["[0:a]"]
     for i, off in enumerate(offsets, start=1):
         off = max(off, _INSERT_MIN_OFFSET_MS)
         parts.append(f"[{i}:a]adelay={off}|{off}[a{i}]")
         labels.append(f"[a{i}]")
-    parts.append(f"{''.join(labels)}amix=inputs={len(offsets) + 1}:duration=first[a]")
+    parts.append(f"{''.join(labels)}amix=inputs={len(offsets) + 1}:duration=first:normalize=0[mix]")
+    parts.append("[mix]alimiter=limit=0.95[a]")
     return ";".join(parts)
 
 

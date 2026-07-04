@@ -45,7 +45,8 @@ async def test_single_overlay_composited_with_timing(tmp_path, monkeypatch):
     assert "[0:v][ov0]overlay=0:0:eof_action=pass:enable='between(t,0.5,2.5)'[v0]" in fc
     # audio graph unchanged
     assert "[1:a]adelay=250|250[a1]" in fc
-    assert "amix=inputs=2:duration=first[a]" in fc
+    assert "amix=inputs=2:duration=first:normalize=0[mix]" in fc
+    assert "[mix]alimiter=limit=0.95[a]" in fc
     assert _maps(args) == ["[v0]", "[a]"]
     assert str(overlay) in args  # overlay clip passed as input
     assert "libx264" in args     # output still h264
