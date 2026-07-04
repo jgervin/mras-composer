@@ -109,6 +109,21 @@ async def test_single_insert_delayed_past_first_250ms(tmp_path, monkeypatch):
     assert "[0:a][a1]amix=inputs=2:duration=first[a]" in fc
 
 
+async def test_amix_does_not_halve_loudness_and_limits_clipping(tmp_path, monkeypatch):
+    """amix normalizes by default (each input scaled 1/N), so the whole personalized
+    clip — music bed AND spoken name — played at 0.5x (-6dB) vs the idle ads playing
+    the same base at full volume. normalize=0 keeps full level; the base peaks near
+    full scale (-0.4dB measured), so a limiter must absorb base+voice summing."""
+    monkeypatch.setattr(asm_mod, "_OUTPUT_DIR", tmp_path)
+    captured = {}
+    with patch("asyncio.create_subprocess_exec", side_effect=_capture_exec(captured)):
+        await assemble(tmp_path / "base.mp4", _one(tmp_path / "audio.mp3"), "trig-loud")
+
+    fc = _filter_complex(captured["args"])
+    assert "[0:a][a1]amix=inputs=2:duration=first:normalize=0[mix]" in fc
+    assert "[mix]alimiter=limit=0.95[a]" in fc
+
+
 async def test_multiple_inserts_each_delayed_to_its_own_mark(tmp_path, monkeypatch):
     monkeypatch.setattr(asm_mod, "_OUTPUT_DIR", tmp_path)
     captured = {}
