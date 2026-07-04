@@ -10,6 +10,8 @@ def _identity_row(name="Jason", blocked=False):
 
 def _ad_row(slug, base="/assets/standard.mp4"):
     return {
+        "ad_id": f"ad-{slug}",
+        "component_id": f"comp-{slug}",
         "base_video": base,
         "slug": slug,
         "default_props": json.dumps({"color": "#fff"}),
@@ -20,13 +22,13 @@ def _ad_row(slug, base="/assets/standard.mp4"):
 def _db(identity=None, ad_rows=()):
     db = AsyncMock()
     db.fetchrow = AsyncMock(side_effect=lambda q, *a: (
-        identity if "identities" in q else (dict(ad_rows[0]) if ad_rows else None)
+        identity if "subject_profiles" in q else (dict(ad_rows[0]) if ad_rows else None)
     ))
     db.fetch = AsyncMock(return_value=[dict(r) for r in ad_rows])
     return db
 
 
-def _trigger(uuid="u1", new=False):
+def _trigger(uuid="11111111-1111-1111-1111-111111111111", new=False):
     return {"uuid": uuid, "is_new_visitor": new, "screen_id": "screen_0"}
 
 
@@ -67,13 +69,13 @@ async def test_blocked_person_gets_standard():
 async def test_identity_deleted_mid_flight_falls_back_instead_of_crashing():
     """select() saw the person, but they vanish before the variants query's
     second identity lookup — must degrade to the legacy selection, not 500."""
-    calls = {"identities": 0}
+    calls = {"subject_profiles": 0}
     ads = [_ad_row("neon")]
 
     async def fetchrow(q, *a):
-        if "identities" in q:
-            calls["identities"] += 1
-            return _identity_row() if calls["identities"] == 1 else None
+        if "subject_profiles" in q:
+            calls["subject_profiles"] += 1
+            return _identity_row() if calls["subject_profiles"] == 1 else None
         return dict(ads[0])
 
     db = AsyncMock()
@@ -82,6 +84,39 @@ async def test_identity_deleted_mid_flight_falls_back_instead_of_crashing():
 
     out = await select_variants(_trigger(), db, count=2)
     assert len(out) == 2 and all(s.type == "personalized" for s in out)
+
+
+async def test_name_nulled_mid_flight_falls_back_instead_of_personalizing_none():
+    """Same mid-flight degradation as the deleted case, but the re-fetch
+    returns a row whose display_name went NULL (e.g. profile merged) —
+    must fall back to [base] * count, never format "Welcome, None!"."""
+    calls = {"subject_profiles": 0}
+    ads = [_ad_row("neon")]
+
+    async def fetchrow(q, *a):
+        if "subject_profiles" in q:
+            calls["subject_profiles"] += 1
+            return _identity_row() if calls["subject_profiles"] == 1 else _identity_row(name=None)
+        return dict(ads[0])
+
+    db = AsyncMock()
+    db.fetchrow = AsyncMock(side_effect=fetchrow)
+    db.fetch = AsyncMock(return_value=[dict(r) for r in ads])
+
+    out = await select_variants(_trigger(), db, count=2)
+    assert len(out) == 2
+    assert all(s.person_name == "Jason" for s in out)  # base selection, not the NULL re-fetch
+    assert all(s.overlay_props["text"] == "Jason" for s in out)
+
+
+async def test_refetch_query_filters_on_known_status():
+    """The variants re-fetch must carry the same status predicate as
+    select() — merged/deleted profiles must not personalize."""
+    db = _db(_identity_row(), [_ad_row("neon")])
+    await select_variants(_trigger(), db, count=2)
+    refetch_query = db.fetchrow.call_args_list[-1].args[0]
+    assert "subject_profiles" in refetch_query
+    assert "status = 'known'" in refetch_query
 
 
 async def test_variant_ads_are_ordered_randomly_not_by_recency():

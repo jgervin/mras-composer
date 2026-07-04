@@ -10,6 +10,9 @@ class _Program:
     uuid: str
     first_seen: float
     round: Round = Round.OPENER
+    # Camera screen_id from the trigger that (re)identified this subject. Threaded
+    # onto Play/RenderAhead so the render lane can camera-scope its God View events.
+    screen_id: str | None = None
 
 
 @dataclass
@@ -31,11 +34,14 @@ class Orchestrator:
 
     # ---- event handlers (each returns a list of Command) ----
 
-    def on_identify(self, uuid: str) -> list:
+    def on_identify(self, uuid: str, screen_id: str | None = None) -> list:
         now = self._clock()
         prog = self._programs.get(uuid)
         if prog is None or prog.round == Round.DONE:
             self._programs[uuid] = _Program(uuid, first_seen=now)
+        # Always stamp the latest triggering camera so the render lane resolves
+        # scope from wherever this subject was most recently seen.
+        self._programs[uuid].screen_id = screen_id
         self._present[uuid] = now
         return self._reassign()
 
@@ -95,8 +101,10 @@ class Orchestrator:
             # only round 2 splits into the A/B pair.
             slot = pair_slot(disp, sorted(owned[new_owner])) if rnd == Round.ROUND2 else 0
             sc.owner, sc.round, sc.playing = new_owner, rnd, True
-            cmds.append(Play(disp, new_owner, rnd, slot))
+            cmds.append(Play(disp, new_owner, rnd, slot,
+                             self._programs[new_owner].screen_id))
             if rnd == Round.OPENER and new_owner not in render_ahead_owners:
                 render_ahead_owners.append(new_owner)
-        cmds.extend(RenderAhead(o, Round.ROUND2) for o in render_ahead_owners)
+        cmds.extend(RenderAhead(o, Round.ROUND2, self._programs[o].screen_id)
+                    for o in render_ahead_owners)
         return cmds

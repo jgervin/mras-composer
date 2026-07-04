@@ -11,6 +11,8 @@ class Play:
     owner: str
     round: Round
     pair_slot: int
+    # Triggering camera screen_id (for render-lane scope on a cache-miss render).
+    screen_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -24,3 +26,5 @@ class RenderAhead:
     """Pre-render an owner's upcoming round while the current one plays."""
     owner: str
     round: Round
+    # Triggering camera screen_id (for render-lane scope).
+    screen_id: str | None = None

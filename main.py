@@ -6,7 +6,6 @@ import os
 import tempfile
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -18,6 +17,7 @@ from pydantic import BaseModel
 
 from src.assembly.assembler import _INSERT_MIN_OFFSET_MS, assemble
 from src.db import create_pool
+from src.events import display_scope, emit, now_iso
 from src.overlay.conformance import assert_conformant
 from src.overlay.http_renderer import build_overlay_inserts_http, render_composition_http
 from src.overlay.probe import probe_video
@@ -137,9 +137,13 @@ async def lifespan(app: FastAPI):
     async def _send_idle(display):
         await app.state.ws.send_to(display, {"type": "idle"})
 
+    async def _emit_event(trigger_id, event_type, status, payload):
+        await _log(app.state.db, trigger_id, event_type, status, payload)
+
     app.state.runtime = OrchestratorRuntime(
         render=renderer.render, send_play=_send_play, send_idle=_send_idle,
         arm_watchdog=lambda d: None, cancel_watchdog=lambda d: None,  # wired below
+        emit=_emit_event,
     )
 
     # Watchdog: advances a display even if its kiosk never emits clip_ended
@@ -197,6 +201,9 @@ def playlist():
 
 class TriggerPayload(BaseModel):
     trigger_id: str
+    # Cross-service subject key. Vision renamed uuid -> subject_profile_id; we read
+    # the new key first and fall back to the legacy `uuid` so both wire shapes work.
+    subject_profile_id: str | None = None
     uuid: str | None = None
     confidence: float = 0.0
     is_new_visitor: bool = True
@@ -271,9 +278,16 @@ async def trigger_endpoint(body: TriggerPayload):
         # Legacy single-variant broadcast (no screen_id-tagged kiosk connected).
         return await _trigger_single_broadcast(body)
 
+    # Resolve the subject from the cross-service key: prefer subject_profile_id
+    # (vision's renamed key), fall back to legacy uuid. The selector still keys on
+    # "uuid", so stamp the resolved subject there before gating.
+    subject = body.subject_profile_id or body.uuid
+    trigger = body.model_dump()
+    trigger["uuid"] = subject
+
     # Standard gate FIRST (cheap query): strangers and blocked people must not
     # enter orchestration (which would reserve displays / spend a render slot).
-    gate = await select(body.model_dump(), app.state.db)
+    gate = await select(trigger, app.state.db)
     if gate.type == "standard":
         await _log(app.state.db, body.trigger_id, "composition", "standard_selected", {})
         return {"status": "standard"}
@@ -283,10 +297,10 @@ async def trigger_endpoint(body: TriggerPayload):
     # 2, idle freed displays). The orchestrator owns the display wall — display
     # splitting, round sequencing and rendering live in the orchestrator/runtime
     # (advanced by kiosk clip_ended + the watchdog), not in this one-shot path.
-    cmds = app.state.orchestrator.on_identify(body.uuid)
+    cmds = app.state.orchestrator.on_identify(subject, body.screen_id)
     await app.state.runtime.apply(cmds)
     await _log(app.state.db, body.trigger_id, "composition", "orchestrated",
-               {"uuid": body.uuid})
+               {"uuid": subject})
     return {"status": "orchestrated"}
 
 
@@ -393,6 +407,9 @@ async def ws_endpoint(ws: WebSocket):
             if msg.get("type") == "clip_ended" and msg.get("screen_id"):
                 cmds = app.state.orchestrator.on_clip_ended(msg["screen_id"])
                 await app.state.runtime.apply(cmds)
+            else:
+                # Display playback echoes (playback_started/ended) → events journal.
+                await _handle_display_echo(app.state.db, msg)
     except WebSocketDisconnect:
         app.state.ws.disconnect(ws)
 
@@ -410,27 +427,65 @@ async def _dispatch_play(db, ws, display, url, owner, rnd, trigger_id) -> None:
     await ws.send_to(display, {
         "type": "play", "video_url": url, "person": owner,
         "ad": f"orch-{owner}-{rnd.name.lower()}",
+        # Echo key: the display returns this trigger_id on playback_started/ended so
+        # the composer can relay them into events keyed to the same playback row.
+        "trigger_id": trigger_id,
     })
     # Record the dispatch so the Activity Feed links the clip and the gaze x
     # playback attention-outcome join has its playback side. The orchestrated
     # runtime replaced the legacy fan-out that was the sole emitter of these.
     # trigger_id is the per-flow id minted by the renderer for THIS composition —
     # NOT the owner/person uuid (person is carried in the payload instead), so the
-    # God View's UNIQUE(trigger_id) / UNIQUE(trigger_id, display_id) hold.
-    await _log(db, trigger_id, "playback", "dispatched",
-               {"video": url.rsplit("/", 1)[-1], "screen_id": display, "person": owner})
+    # God View's UNIQUE(trigger_id) / UNIQUE(trigger_id, screen_id) hold.
+    media = url.rsplit("/", 1)[-1]
+    dispatched_at = now_iso()
+    await _log(db, trigger_id, "playback", "dispatched", {
+        **display_scope(display),
+        "trigger_id": trigger_id,
+        "ad_run_trigger_id": trigger_id,
+        "media_asset_ref": media,
+        "dispatched_at": dispatched_at,
+        # back-compat fields the Activity Feed already reads
+        "video": media, "person": owner,
+    })
+    # ad_run status transition planned -> dispatched (same trigger_id row; the
+    # projector merges this onto the ad_run/planned row opened by the renderer).
+    # started_at is intentionally NOT set here — it means "playback started" and is
+    # set by ad_run/playing; the dispatch clock is not the playback-start clock.
+    await _log(db, trigger_id, "ad_run", "dispatched", {
+        **display_scope(display),
+        "trigger_id": trigger_id,
+    })
+
+
+async def _handle_display_echo(db, msg: dict) -> bool:
+    """Relay a display's playback echo into the events journal (composer terminus;
+    the display has no DB layer). Returns True if the message was an echo we handled.
+
+    Timestamps use the composer server clock (authoritative). Requires trigger_id +
+    screen_id — without them the (trigger_id, screen_id) playback row can't be keyed,
+    so the echo is ignored."""
+    mtype = msg.get("type")
+    trigger_id = msg.get("trigger_id")
+    screen_id = msg.get("screen_id")
+    if mtype not in ("playback_started", "playback_ended") or not trigger_id or not screen_id:
+        return False
+    ts = now_iso()
+    if mtype == "playback_started":
+        await _log(db, trigger_id, "playback", "started", {
+            **display_scope(screen_id), "trigger_id": trigger_id, "started_at": ts})
+        await _log(db, trigger_id, "ad_run", "playing", {
+            **display_scope(screen_id), "trigger_id": trigger_id, "started_at": ts})
+        return True
+    # playback_ended
+    ended = {**display_scope(screen_id), "trigger_id": trigger_id, "ended_at": ts}
+    if msg.get("duration_ms") is not None:
+        ended["duration_ms"] = msg["duration_ms"]
+    await _log(db, trigger_id, "playback", "ended", ended)
+    await _log(db, trigger_id, "ad_run", "completed", {
+        **display_scope(screen_id), "trigger_id": trigger_id, "ended_at": ts})
+    return True
 
 
 async def _log(db, trigger_id: str, event_type: str, status: str, payload: dict) -> None:
-    try:
-        await db.execute(
-            "INSERT INTO events (trigger_id, ts, service, event_type, status, payload) "
-            "VALUES ($1, $2, 'mras-composer', $3, $4, $5::jsonb)",
-            trigger_id,
-            datetime.now(timezone.utc),
-            event_type,
-            status,
-            json.dumps(payload),
-        )
-    except Exception as exc:
-        logger.error("DB event log failed: %s", exc)
+    await emit(db, trigger_id, event_type, status, payload)

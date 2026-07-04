@@ -1,10 +1,16 @@
 import asyncio
 import logging
+import uuid
 
+from src.events import display_scope, now_iso
 from src.orchestrator.commands import Idle, Play, RenderAhead
 from src.orchestrator.model import Round
 
 logger = logging.getLogger(__name__)
+
+
+async def _noop_emit(*_args, **_kwargs) -> None:
+    return None
 
 
 class OrchestratorRuntime:
@@ -19,12 +25,16 @@ class OrchestratorRuntime:
     shares that render's trigger_id (and never the owner/person uuid).
     """
 
-    def __init__(self, render, send_play, send_idle, arm_watchdog, cancel_watchdog):
+    def __init__(self, render, send_play, send_idle, arm_watchdog, cancel_watchdog,
+                 emit=None):
         self._render = render
         self._send_play = send_play
         self._send_idle = send_idle
         self._arm_watchdog = arm_watchdog
         self._cancel_watchdog = cancel_watchdog
+        # emit(trigger_id, event_type, status, payload) -> awaitable. Defaults to a
+        # no-op so wiring that predates God View emission keeps working.
+        self._emit = emit or _noop_emit
         self._cache: dict[tuple, list] = {}
         self._inflight: dict[tuple, asyncio.Task] = {}
         self._pending: dict[str, tuple] = {}  # display -> (owner, round, slot)
@@ -36,15 +46,31 @@ class OrchestratorRuntime:
         async with self._lock:
             for c in commands:
                 if isinstance(c, RenderAhead):
-                    self._ensure_render(c.owner, c.round)
+                    self._ensure_render(c.owner, c.round, c.screen_id)
                 elif isinstance(c, Idle):
                     self._pending.pop(c.display, None)
                     self._cancel_watchdog(c.display)
                     await self._send_idle(c.display)
+                    await self._emit_idle(c.display)
                 elif isinstance(c, Play):
                     await self._play(c)
 
-    def _ensure_render(self, owner, rnd) -> None:
+    async def _emit_idle(self, display) -> None:
+        """E6: an idle segment is an observable playback with a null subject, so it
+        emits playback/dispatched (and only that — an idle segment intentionally has
+        no ad_run row). Mint a fresh uuid4 trigger_id per segment so the God View's
+        UNIQUE(trigger_id) keys never collide across idle rotations. The payload
+        carries only the canonical playback fields the projector's playbacks fold
+        reads (the ad_run-only fields it never reads are omitted)."""
+        trigger_id = str(uuid.uuid4())
+        await self._emit(trigger_id, "playback", "dispatched", {
+            **display_scope(display),
+            "trigger_id": trigger_id,
+            "media_asset_ref": None,
+            "dispatched_at": now_iso(),
+        })
+
+    def _ensure_render(self, owner, rnd, screen_id=None) -> None:
         key = (owner, rnd)
         if key in self._cache or key in self._inflight:
             return
@@ -52,7 +78,7 @@ class OrchestratorRuntime:
         async def run():
             try:
                 # render returns (trigger_id, urls); cache both together.
-                self._cache[key] = await self._render(owner, rnd)
+                self._cache[key] = await self._render(owner, rnd, screen_id)
                 await self._resume_pending(owner, rnd)
             except Exception:
                 # Never let a render failure become an unretrieved task exception.
@@ -84,7 +110,7 @@ class OrchestratorRuntime:
             self._pending[c.display] = (c.owner, c.round, c.pair_slot)
             await self._send_idle(c.display)
             self._arm_watchdog(c.display)
-            self._ensure_render(c.owner, c.round)
+            self._ensure_render(c.owner, c.round, c.screen_id)
 
     async def _resume_pending(self, owner, rnd) -> None:
         trigger_id, urls = self._cache[(owner, rnd)]
