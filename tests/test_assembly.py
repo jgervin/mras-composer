@@ -106,7 +106,7 @@ async def test_single_insert_delayed_past_first_250ms(tmp_path, monkeypatch):
     # Input 1 is the inserted name/speech; it must not sound in the first 250ms.
     fc = _filter_complex(captured["args"])
     assert "[1:a]adelay=250|250[a1]" in fc
-    assert "[0:a][a1]amix=inputs=2:duration=first[a]" in fc
+    assert "[0:a][a1]amix=inputs=2:duration=first:normalize=0[mix]" in fc
 
 
 async def test_amix_does_not_halve_loudness_and_limits_clipping(tmp_path, monkeypatch):
@@ -135,7 +135,8 @@ async def test_multiple_inserts_each_delayed_to_its_own_mark(tmp_path, monkeypat
     fc = _filter_complex(args)
     assert "[1:a]adelay=250|250[a1]" in fc
     assert "[2:a]adelay=1500|1500[a2]" in fc
-    assert "[0:a][a1][a2]amix=inputs=3:duration=first[a]" in fc
+    assert "[0:a][a1][a2]amix=inputs=3:duration=first:normalize=0[mix]" in fc
+    assert "[mix]alimiter=limit=0.95[a]" in fc
     # both inserts are passed to ffmpeg as inputs
     assert str(tmp_path / "name.aiff") in args
     assert str(tmp_path / "promo.aiff") in args
