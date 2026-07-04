@@ -11,12 +11,21 @@ over a real asyncpg connection.
 Pattern copied from /Users/jn/code/mras-ops/tests/test_schema_godview.py.
 
 Requirements (module SKIPS cleanly when unmet — never breaks CI-less envs):
-- migrations dir: ``MRAS_OPS_MIGRATIONS_DIR`` env var, default
-  ``../mras-ops/db/migrations`` resolved relative to this repo's root
+- migrations dir: ``MRAS_OPS_MIGRATIONS_DIR`` env var; default walks upward
+  from this repo's root looking for a sibling ``mras-ops/db/migrations`` at
+  each ancestor level (so git worktrees under ``.worktrees/`` resolve too)
 - the dockerized Postgres running:
       cd /Users/jn/code/mras-ops && docker compose up -d postgres
+
+Set ``MRAS_CONTRACT_REQUIRED=1`` to turn every skip into a hard failure
+(for environments where this contract MUST run, e.g. a wired-up CI job).
+
+Only *connection establishment* may skip. Once a connection succeeds, any
+migration/seed error propagates as a test ERROR — schema drift must never
+masquerade as "server unavailable".
 """
 import asyncio
+import contextlib
 import glob
 import os
 import pathlib
@@ -28,14 +37,28 @@ import pytest
 from src.selector.selector import select, select_variants
 
 _REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
+
+
+def _default_migrations_dir() -> pathlib.Path:
+    # Walk upward: a plain checkout finds /Users/jn/code/mras-ops next to the
+    # repo; a worktree at <repo>/.worktrees/<name> finds it two levels up.
+    for ancestor in _REPO_ROOT.parents:
+        candidate = ancestor / "mras-ops" / "db" / "migrations"
+        if candidate.is_dir():
+            return candidate
+    return _REPO_ROOT.parent / "mras-ops" / "db" / "migrations"
+
+
 MIGRATIONS_DIR = pathlib.Path(
-    os.environ.get("MRAS_OPS_MIGRATIONS_DIR", str(_REPO_ROOT.parent / "mras-ops" / "db" / "migrations"))
+    os.environ.get("MRAS_OPS_MIGRATIONS_DIR", str(_default_migrations_dir()))
 )
 MIGRATIONS = sorted(glob.glob(str(MIGRATIONS_DIR / "*.sql")))
 
 ADMIN_DSN = os.environ.get("ADMIN_DATABASE_URL", "postgresql://mras:mras@localhost:5432/postgres")
-TEST_DB = "mras_composer_contract_test"
-TEST_DSN = "postgresql://mras:mras@localhost:5432/" + TEST_DB
+# Randomized per test run so parallel agents/worktrees never collide on the
+# throwaway DB (multi-agent-on-worktrees workflow).
+TEST_DB = f"mras_composer_contract_{uuid.uuid4().hex[:8]}"
+TEST_DSN = f"postgresql://mras:mras@localhost:5432/{TEST_DB}"
 
 # Seeded subject_profiles rows (fixed UUIDs so every test agrees on them).
 KNOWN_NAMED_UUID = "11111111-1111-4111-8111-111111111111"      # status='known', display_name set
@@ -43,18 +66,36 @@ ANONYMOUS_UUID = "22222222-2222-4222-8222-222222222222"        # status='anonymo
 KNOWN_NULL_NAME_UUID = "33333333-3333-4333-8333-333333333333"  # status='known', display_name NULL
 ABSENT_UUID = str(uuid.uuid4())                                # never inserted
 
-_PG_ERRORS = (OSError, asyncio.TimeoutError, asyncpg.PostgresError)
+
+class _PgUnavailable(Exception):
+    """Dev Postgres unreachable (connection-refused class) — the ONLY skippable condition."""
+
+
+def _skip_or_fail(reason: str):
+    if os.environ.get("MRAS_CONTRACT_REQUIRED") == "1":
+        pytest.fail(f"MRAS_CONTRACT_REQUIRED=1 but contract cannot run: {reason}")
+    pytest.skip(reason)
+
+
+async def _connect(dsn: str) -> asyncpg.Connection:
+    # Only the connect itself may convert into a SKIP. asyncpg.PostgresError is
+    # deliberately NOT caught: once the server answers, errors (failed
+    # migration, drifted column, bad seed) are real failures.
+    try:
+        return await asyncpg.connect(dsn, timeout=5)
+    except (OSError, asyncio.TimeoutError) as exc:
+        raise _PgUnavailable(f"cannot reach Postgres at {dsn}: {exc!r}") from exc
 
 
 async def _setup_contract_db():
-    admin = await asyncpg.connect(ADMIN_DSN, timeout=5)
+    admin = await _connect(ADMIN_DSN)
     try:
         await admin.execute(f"DROP DATABASE IF EXISTS {TEST_DB} WITH (FORCE)")
         await admin.execute(f"CREATE DATABASE {TEST_DB}")
     finally:
         await admin.close()
 
-    conn = await asyncpg.connect(TEST_DSN)
+    conn = await _connect(TEST_DSN)
     try:
         for path in MIGRATIONS:
             await conn.execute(pathlib.Path(path).read_text())
@@ -69,7 +110,7 @@ async def _setup_contract_db():
 
 
 async def _drop_contract_db():
-    admin = await asyncpg.connect(ADMIN_DSN, timeout=5)
+    admin = await _connect(ADMIN_DSN)
     try:
         await admin.execute(f"DROP DATABASE IF EXISTS {TEST_DB} WITH (FORCE)")
     finally:
@@ -81,11 +122,21 @@ def contract_db():
     """Sync module fixture: builds the throwaway DB once via asyncio.run so it
     stays independent of pytest-asyncio's per-test event loops."""
     if not MIGRATIONS:
-        pytest.skip(f"no mras-ops migrations found at {MIGRATIONS_DIR} (set MRAS_OPS_MIGRATIONS_DIR)")
+        _skip_or_fail(
+            f"no mras-ops migrations found at {MIGRATIONS_DIR} (set MRAS_OPS_MIGRATIONS_DIR)"
+        )
     try:
         asyncio.run(_setup_contract_db())
-    except _PG_ERRORS as exc:
-        pytest.skip(f"Postgres dev server unavailable at {ADMIN_DSN}: {exc!r}")
+    except _PgUnavailable as exc:
+        _skip_or_fail(str(exc))
+    except BaseException:
+        # Mid-setup failure (e.g. a drifted migration or failed seed) must
+        # surface as a test ERROR, not a skip. Best-effort drop so the
+        # randomized throwaway DB is not orphaned; suppressed because the
+        # server itself may be what just broke.
+        with contextlib.suppress(Exception):
+            asyncio.run(_drop_contract_db())
+        raise
     yield
     asyncio.run(_drop_contract_db())
 
