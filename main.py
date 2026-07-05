@@ -40,6 +40,22 @@ _OVERLAY_SIDECAR_URL = os.getenv("OVERLAY_SIDECAR_URL", "http://mras-overlays:30
 _OVERLAY_FRACTION = float(os.getenv("OVERLAY_DURATION_FRACTION", "0.5"))
 
 
+def _abandon_ttl_from_env() -> float:
+    """Abandon-TTL policy for the orchestrator (issue #36), read at eval time.
+
+    Env is the DEFAULT layer (future God View/campaign config may go LOWER); the
+    max(..., 60) is only a sanity clamp against a pathological near-zero misconfig
+    evict-thrashing a live demo. A malformed value must not raise inside every
+    tick — fall back to the 900s default with a warning (review M1)."""
+    raw = os.getenv("PROGRAM_ABANDON_TTL_S", "900")
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning("PROGRAM_ABANDON_TTL_S malformed (%r), using 900", raw)
+        value = 900.0
+    return max(value, 60.0)
+
+
 def build_playlist(assets_dir: Path, base_url: str) -> list[str]:
     """Idle-rotation videos: every assets/*.mp4 as a full URL, sorted by name.
 
@@ -123,12 +139,9 @@ async def lifespan(app: FastAPI):
     from src.orchestrator.runtime import OrchestratorRuntime
     from src.orchestrator.renderer import Renderer
     displays = [f"display-{i}" for i in range(1, int(os.getenv("DISPLAY_COUNT", "4")) + 1)]
-    # Env is the DEFAULT layer for the abandon TTL (future God View/campaign config may go
-    # LOWER); the max(..., 60) is only a sanity clamp against a pathological near-zero
-    # misconfig evict-thrashing a live demo.
     app.state.orchestrator = Orchestrator(
         displays,
-        abandon_ttl_s=lambda p: max(float(os.getenv("PROGRAM_ABANDON_TTL_S", "900")), 60.0),
+        abandon_ttl_s=lambda p: _abandon_ttl_from_env(),
     )
     renderer = Renderer(
         app.state.db, app.state.http,
