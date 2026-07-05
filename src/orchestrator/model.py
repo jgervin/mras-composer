@@ -34,3 +34,11 @@ def pair_slot(display: str, owned_displays: list[str]) -> int:
     n=1→[0], n=2→[0,1], n=3→[0,0,1], n=4→[0,0,1,1]."""
     half = math.ceil(len(owned_displays) / 2)
     return 0 if owned_displays.index(display) < half else 1
+
+
+def keep_half(displays: list[str]) -> list[str]:
+    """Round-2 peel-back (TODO-10): keep the first floor(n/2) displays (minimum 1)
+    in sorted order; the rest drop to idle. n=1→1, n=2→1, n=4→2, n=6→3. Sorting
+    makes the kept set deterministic regardless of input order."""
+    ordered = sorted(displays)
+    return ordered[: max(1, len(ordered) // 2)]
