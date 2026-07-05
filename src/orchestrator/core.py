@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from src.orchestrator.commands import EvictRender, Idle, Play, RenderAhead
-from src.orchestrator.model import Round, even_split, next_round, pair_slot
+from src.orchestrator.model import Round, even_split, keep_half, next_round, pair_slot
 
 
 @dataclass
@@ -102,8 +102,11 @@ class Orchestrator:
     # ---- internals ----
 
     def _active_newest_first(self) -> list[str]:
-        active = [u for u, p in self._programs.items()
-                  if p.round != Round.DONE and u in self._present]
+        # Presence does NOT gate a running program (owner-locked peel-back spec,
+        # 2026-07-05): once started, a program runs opener → round 2 → done whether
+        # or not the subject is still present. Presence's only remaining role is the
+        # abandon-TTL sweep in tick() (a lingering subject is never swept).
+        active = [u for u, p in self._programs.items() if p.round != Round.DONE]
         return sorted(active, key=lambda u: self._programs[u].first_seen, reverse=True)
 
     def _reassign(self) -> list:
@@ -111,13 +114,25 @@ class Orchestrator:
         owned: dict[str, list[str]] = {}
         for disp, owner in split.items():
             owned.setdefault(owner, []).append(disp)
+        # Round-2 peel-back (TODO-10): a program's round 2 continues on only the
+        # first floor(n/2) of its displays (min 1, sorted); the rest idle. Openers
+        # still cover every owned display. This runs whether or not the subject is
+        # still present (see _active_newest_first).
+        kept_displays: dict[str, list[str]] = {}
+        active: dict[str, str] = {}  # display → owner, after peel-back
+        for owner, disps in owned.items():
+            kept = keep_half(disps) if self._programs[owner].round == Round.ROUND2 \
+                else sorted(disps)
+            kept_displays[owner] = kept
+            for disp in kept:
+                active[disp] = owner
         cmds: list = []
         render_ahead_owners: list[str] = []  # one render-ahead per owner, not per display
         for disp in self._displays:
             sc = self._screens[disp]
             if sc.playing:
                 continue  # never interrupt a personalized clip mid-play
-            new_owner = split.get(disp)
+            new_owner = active.get(disp)
             if new_owner is None:
                 if sc.owner is not None:
                     sc.owner, sc.round = None, None
@@ -125,8 +140,8 @@ class Orchestrator:
                 continue
             rnd = self._programs[new_owner].round
             # Opener plays one shared render on every owned display (slot 0);
-            # only round 2 splits into the A/B pair.
-            slot = pair_slot(disp, sorted(owned[new_owner])) if rnd == Round.ROUND2 else 0
+            # only round 2 splits into the A/B pair across the kept half.
+            slot = pair_slot(disp, kept_displays[new_owner]) if rnd == Round.ROUND2 else 0
             sc.owner, sc.round, sc.playing = new_owner, rnd, True
             cmds.append(Play(disp, new_owner, rnd, slot,
                              self._programs[new_owner].screen_id))
