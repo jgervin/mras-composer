@@ -223,6 +223,32 @@ async def seeded_ad_catalog(db):
     """
     tr = db.transaction()
     await tr.start()
+    await db.execute(
+        "INSERT INTO components (id, name, slug, status) VALUES "
+        f"('{COMP_A_UUID}', 'Lower Third', 'lower-third', 'ready'), "
+        f"('{COMP_B_UUID}', 'Side Banner', 'side-banner', 'ready'), "
+        f"('{COMP_X_UUID}', 'Broken Bundle', 'broken-bundle', 'bundling')"
+    )
+    # The two INELIGIBLE ads are deliberately the NEWEST rows so a single
+    # newest-eligible equality assertion proves ordering AND both predicates.
+    await db.execute(
+        "INSERT INTO ads (id, name, base_video, component_id, default_props, "
+        "personalized_field, is_active, created_at) VALUES "
+        f"('{AD_INACTIVE_UUID}', 'Inactive Ad', '/assets/standard.mp4', "
+        f"'{COMP_A_UUID}', '{{}}', 'text', false, now()), "
+        f"('{AD_NOT_READY_UUID}', 'Not Ready Ad', '/assets/standard.mp4', "
+        f"'{COMP_X_UUID}', '{{}}', 'text', true, now() - interval '1 minute'), "
+        f"('{AD_A_UUID}', 'Acme Lower Third', '/assets/standard.mp4', "
+        f"'{COMP_A_UUID}', '{{\"logo\": \"acme\"}}', 'name', true, "
+        "now() - interval '2 minutes')"
+    )
+    # AD_B deliberately OMITS default_props/personalized_field: the migration
+    # DEFAULTs ('{}'::jsonb / 'text') must flow through the selector.
+    await db.execute(
+        "INSERT INTO ads (id, name, base_video, component_id, is_active, created_at) "
+        f"VALUES ('{AD_B_UUID}', 'Side Banner Ad', '/assets/standard.mp4', "
+        f"'{COMP_B_UUID}', true, now() - interval '3 minutes')"
+    )
     yield {
         "COMP_A": COMP_A_UUID,
         "COMP_B": COMP_B_UUID,
