@@ -23,6 +23,11 @@ Set ``MRAS_CONTRACT_REQUIRED=1`` to turn every skip into a hard failure
 Only *connection establishment* may skip. Once a connection succeeds, any
 migration/seed error propagates as a test ERROR — schema drift must never
 masquerade as "server unavailable".
+
+Note: ``ads.base_video`` duplicating ``media_assets.storage_url`` is a
+transitional dual source of truth (called out in
+/Users/jn/code/mras-ops/db/migrations/014_creative.sql itself) — this suite is
+the tripwire that must break when the selector migrates to ``media_assets``.
 """
 import asyncio
 import contextlib
@@ -65,6 +70,16 @@ KNOWN_NAMED_UUID = "11111111-1111-4111-8111-111111111111"      # status='known',
 ANONYMOUS_UUID = "22222222-2222-4222-8222-222222222222"        # status='anonymous', display_name set
 KNOWN_NULL_NAME_UUID = "33333333-3333-4333-8333-333333333333"  # status='known', display_name NULL
 ABSENT_UUID = str(uuid.uuid4())                                # never inserted
+
+# Ad-catalog rows seeded per-test by the ``seeded_ad_catalog`` fixture (fixed
+# UUIDs so assertions can name rows exactly; issue #37).
+COMP_A_UUID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"       # slug 'lower-third', status 'ready'
+COMP_B_UUID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"       # slug 'side-banner', status 'ready'
+COMP_X_UUID = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"       # slug 'broken-bundle', status 'bundling'
+AD_A_UUID = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"         # eligible, newest eligible
+AD_B_UUID = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"         # eligible, migration-default props
+AD_INACTIVE_UUID = "ffffffff-ffff-4fff-8fff-ffffffffffff"  # is_active=false (newest row overall)
+AD_NOT_READY_UUID = "99999999-9999-4999-8999-999999999999" # active but component still 'bundling'
 
 
 class _PgUnavailable(Exception):
@@ -188,3 +203,68 @@ async def test_select_variants_runs_real_variant_sql(db):
     assert len(variants) == 2
     assert all(v.type == "personalized" for v in variants)
     assert all(v.person_name == "Ada Lovelace" for v in variants)
+
+
+# ---------------------------------------------------------------------------
+# Ad-bound path (issue #37): the seeded catalog below exercises the selector's
+# real ads JOIN — eligibility predicates, ordering, and jsonb/uuid decoding.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+async def seeded_ad_catalog(db):
+    """Seed the ad catalog inside a per-test transaction, rolled back on
+    teardown.
+
+    WARNING for future editors: keep this seed function-scoped and rolled
+    back — do NOT move it into the module-scoped ``contract_db`` fixture. The
+    four zero-ads tests above depend on an EMPTY ads/components catalog (they
+    assert the text-overlay fallback).
+    """
+    tr = db.transaction()
+    await tr.start()
+    yield {
+        "COMP_A": COMP_A_UUID,
+        "COMP_B": COMP_B_UUID,
+        "COMP_X": COMP_X_UUID,
+        "AD_A": AD_A_UUID,
+        "AD_B": AD_B_UUID,
+        "AD_INACTIVE": AD_INACTIVE_UUID,
+        "AD_NOT_READY": AD_NOT_READY_UUID,
+    }
+    await tr.rollback()
+
+
+async def test_select_returns_newest_eligible_ad(db, seeded_ad_catalog):
+    # The two INELIGIBLE ads are seeded NEWEST, so this single equality proves
+    # ORDER BY created_at DESC + is_active exclusion + status='ready'
+    # exclusion at once — plus real-jsonb decode and uuid stringification.
+    sel = await select(_trigger(KNOWN_NAMED_UUID), db)
+    assert sel.type == "personalized"
+    assert sel.ad_id == AD_A_UUID
+    assert sel.component_id == COMP_A_UUID
+    assert sel.composition_id == "comp-lower-third"
+    assert sel.base_video == pathlib.Path("/assets/standard.mp4")
+    assert sel.overlay_props == {"logo": "acme", "name": "Ada Lovelace"}
+
+
+async def test_select_variants_filters_and_cycles(db, seeded_ad_catalog):
+    # Set-based assertions only: the variants query is ORDER BY random().
+    two = await select_variants(_trigger(KNOWN_NAMED_UUID), db, 2)
+    assert {v.composition_id for v in two} == {"comp-lower-third", "comp-side-banner"}
+    two_ad_ids = {v.ad_id for v in two}
+    assert AD_INACTIVE_UUID not in two_ad_ids
+    assert AD_NOT_READY_UUID not in two_ad_ids
+
+    five = await select_variants(_trigger(KNOWN_NAMED_UUID), db, 5)
+    assert len(five) == 5
+    assert {v.ad_id for v in five} == {AD_A_UUID, AD_B_UUID}
+
+
+async def test_ads_schema_defaults_flow_through_selector(db, seeded_ad_catalog):
+    # AD_B is INSERTed without default_props/personalized_field: the migration
+    # DEFAULTs ('{}'::jsonb / 'text') are selector contract for minimal rows.
+    variants = await select_variants(_trigger(KNOWN_NAMED_UUID), db, 2)
+    ad_b = next((v for v in variants if v.ad_id == AD_B_UUID), None)
+    assert ad_b is not None, f"AD_B missing from variants: {[v.ad_id for v in variants]}"
+    assert ad_b.overlay_props == {"text": "Ada Lovelace"}
