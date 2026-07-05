@@ -1,6 +1,7 @@
 from src.orchestrator.model import Round, next_round
 from src.orchestrator.model import even_split  # noqa: E402
 from src.orchestrator.model import pair_slot  # noqa: E402
+from src.orchestrator.model import keep_half  # noqa: E402
 
 
 def test_next_round_advances_opener_to_round2_to_done():
@@ -61,3 +62,36 @@ def test_pair_slot_one_display_is_A():
 def test_pair_slot_three_displays_is_AAB():
     owned = ["display-1", "display-2", "display-3"]
     assert [pair_slot(dd, owned) for dd in owned] == [0, 0, 1]
+
+
+# ---- round-2 peel-back (TODO-10): keep floor(n/2) displays, minimum 1 ----
+
+
+def test_keep_half_four_displays_keeps_first_two():
+    assert keep_half(["display-1", "display-2", "display-3", "display-4"]) \
+        == ["display-1", "display-2"]
+
+
+def test_keep_half_two_displays_keeps_one():
+    assert keep_half(["display-1", "display-2"]) == ["display-1"]
+
+
+def test_keep_half_one_display_keeps_it():
+    # floor(1/2)=0 but the minimum is 1 — a solo display never drops to zero.
+    assert keep_half(["display-1"]) == ["display-1"]
+
+
+def test_keep_half_six_displays_keeps_three():
+    assert keep_half(["display-%d" % i for i in range(1, 7)]) \
+        == ["display-1", "display-2", "display-3"]
+
+
+def test_keep_half_three_displays_keeps_one():
+    # floor(3/2)=1
+    assert keep_half(["display-1", "display-2", "display-3"]) == ["display-1"]
+
+
+def test_keep_half_is_deterministic_by_sort_order():
+    # peel-back must pick the same displays regardless of input ordering
+    assert keep_half(["display-3", "display-1", "display-4", "display-2"]) \
+        == ["display-1", "display-2"]

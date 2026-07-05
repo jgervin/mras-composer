@@ -39,26 +39,55 @@ def test_on_identify_starts_opener_on_all_idle_displays_and_renders_ahead():
     assert sum(isinstance(c, RenderAhead) for c in cmds) == 1
 
 
-def test_clip_ended_advances_to_round2_paired_AABB():
+def test_clip_ended_peels_round2_back_to_half():
+    # Peel-back (TODO-10): after the openers end on all four displays, round 2
+    # continues on only the first floor(4/2)=2 displays (A on display-1, B on
+    # display-2); the dropped half idles.
     o = _orch()
     o.on_identify("jason")  # opener on 1..4 (all now playing)
-    # all four openers end (first one advances the program to round 2)
-    cmds = []
+    all_cmds = []
     for d in ["display-1", "display-2", "display-3", "display-4"]:
-        cmds = o.on_clip_ended(d)
-    # after the last clip_ended, every display projects round 2, paired A,A,B,B
-    plays = {c.display: c for c in cmds if isinstance(c, Play)}
-    # the last-ended display (display-4) is reassigned in this call
-    assert plays["display-4"] == Play("display-4", "jason", Round.ROUND2, 1)
+        all_cmds += o.on_clip_ended(d)
+    plays = {c.display: c for c in all_cmds if isinstance(c, Play)}
+    idled = {c.display for c in all_cmds if isinstance(c, Idle)}
+    # kept half continues round 2, paired A,B
+    assert plays["display-1"] == Play("display-1", "jason", Round.ROUND2, 0)
+    assert plays["display-2"] == Play("display-2", "jason", Round.ROUND2, 1)
+    # dropped half idles, never gets a round-2 play
+    assert "display-3" not in plays and "display-4" not in plays
+    assert "display-3" in idled and "display-4" in idled
 
 
-def test_first_opener_end_advances_program_once():
+def test_full_peelback_four_to_two_survives_presence_loss():
+    # Owner-locked headline scenario (2026-07-05), the E2E in miniature: opener on
+    # all four displays → subject walks away (presence expires) → round 2 still
+    # peels to EXACTLY two displays; the other two idle.
+    clock = _Clock(0.0)
+    o = Orchestrator(["display-1", "display-2", "display-3", "display-4"],
+                     clock=clock, presence_ttl_s=5.0)
+    o.on_identify("jason")               # opener on all 4 (playing)
+    clock.t = 100.0                      # long gone: presence expired (still < 900s abandon)
+    o.tick()
+    assert "jason" not in o._present
+    all_cmds = []
+    for d in ["display-1", "display-2", "display-3", "display-4"]:
+        all_cmds += o.on_clip_ended(d)
+    round2 = [c for c in all_cmds if isinstance(c, Play) and c.round == Round.ROUND2]
+    idled = {c.display for c in all_cmds if isinstance(c, Idle)}
+    assert len(round2) == 2                                    # exactly half
+    assert {c.display for c in round2} == {"display-1", "display-2"}
+    assert {"display-3", "display-4"} <= idled                # dropped half idles
+
+
+def test_first_opener_end_advances_once_then_peels_to_one():
     o = _orch(displays=("display-1", "display-2"))
     o.on_identify("jason")            # opener on 1,2
-    cmds1 = o.on_clip_ended("display-1")  # first → advance to round 2, play round2 on d1
+    cmds1 = o.on_clip_ended("display-1")  # first → advance to round 2; peel keeps display-1
     assert Play("display-1", "jason", Round.ROUND2, 0) in cmds1
-    cmds2 = o.on_clip_ended("display-2")  # second → program already round2, no double-advance
-    assert Play("display-2", "jason", Round.ROUND2, 1) in cmds2
+    cmds2 = o.on_clip_ended("display-2")  # second → already round2 (no double-advance); dropped half
+    assert o._programs["jason"].round == Round.ROUND2   # still round 2, NOT past-done
+    assert Idle("display-2") in cmds2
+    assert not any(isinstance(c, Play) for c in cmds2)  # display-2 dropped, no round-2 play
 
 
 def test_program_caps_at_round2_then_idles_no_round3():
@@ -108,16 +137,22 @@ def test_newest_wins_takes_freed_displays_at_boundaries():
     assert play.round == Round.OPENER
 
 
-def test_presence_ttl_expiry_drops_owner_and_idles_on_next_boundary():
+def test_round2_plays_even_after_presence_expires():
+    # Peel-back contract (owner-locked 2026-07-05): once a program starts it runs
+    # opener → round 2 → done WHETHER OR NOT the subject is still present. Presence
+    # no longer gates round advancement — the subject can walk away and round 2
+    # still plays.
     clock = _Clock(0.0)
     o = Orchestrator(["display-1"], clock=clock, presence_ttl_s=5.0)
     o.on_identify("jason")               # present at t=0, opener on d1 (playing)
     clock.t = 3.0
     o.on_presence(["jason"])             # heartbeat refreshes last_seen=3.0
-    clock.t = 10.0                       # >5s since last heartbeat → expired
+    clock.t = 10.0                       # >5s since last heartbeat → presence expired
     o.tick()                             # jason no longer present; d1 still playing → skipped
-    cmds = o.on_clip_ended("display-1")  # clip ends → no active owner → idle
-    assert Idle("display-1") in cmds
+    assert "jason" not in o._present     # precondition: presence is gone
+    cmds = o.on_clip_ended("display-1")  # clip ends → advances to round 2 and PLAYS (not idle)
+    assert Play("display-1", "jason", Round.ROUND2, 0) in cmds
+    assert Idle("display-1") not in cmds
 
 
 def test_presence_heartbeat_keeps_owner_active():
@@ -132,22 +167,24 @@ def test_presence_heartbeat_keeps_owner_active():
     assert any(isinstance(c, Play) and c.owner == "jason" for c in cmds)
 
 
-def test_remaining_active_person_reclaims_displays_after_other_leaves():
+def test_departed_subject_keeps_share_until_done_newest_takes_freed():
+    # New peel-back contract: presence no longer drops a running program. A subject
+    # who walks away keeps their even-split share of displays until their own
+    # program completes; the newest present subject takes displays as they FREE
+    # (via even_split), rather than stealing the departed subject's in-flight one.
     clock = _Clock(0.0)
     o = Orchestrator(["display-1", "display-2"], clock=clock, presence_ttl_s=5.0)
     o.on_identify("jason")    # t0: jason owns 1,2 (opener playing on both)
     clock.t = 1.0
-    o.on_identify("maria")    # maria active; split 1/1 deferred to boundaries
-    # jason leaves (never heartbeats again); only maria keeps heartbeating
+    o.on_identify("maria")    # maria newest; even_split → d1:maria, d2:jason (deferred, busy)
     clock.t = 9.0
-    o.on_presence(["maria"])  # maria fresh at t=9
+    o.on_presence(["maria"])  # maria fresh; jason silent since t=0
     clock.t = 10.0
-    o.tick()                  # jason (last seen t=0) expires; maria (t=9) stays
-    # both displays end their clips → maria (only active) reclaims both
-    o.on_clip_ended("display-1")
-    cmds = o.on_clip_ended("display-2")
-    owners = {c.owner for c in cmds if isinstance(c, Play)}
-    assert owners == {"maria"}
+    o.tick()                  # jason presence expired BUT program alive (<900s abandon)
+    c1 = o.on_clip_ended("display-1")   # d1 frees → maria (newest) takes it for her opener
+    assert any(isinstance(c, Play) and c.owner == "maria" for c in c1)
+    c2 = o.on_clip_ended("display-2")   # d2 frees → jason's OWN round 2 plays (he left, runs on)
+    assert Play("display-2", "jason", Round.ROUND2, 0) in c2
 
 
 # ---- abandoned-program TTL sweep (issue #36) ----
@@ -169,21 +206,23 @@ def test_abandoned_mid_round_program_swept_after_ttl_fresh_opener_on_return():
     assert o._programs["jason"].first_seen == 902.0
 
 
-def test_return_within_ttl_resumes_round2_no_evict_and_restamps_window():
+def test_return_within_ttl_restamps_abandon_window_no_evict():
+    # A subject who leaves mid-program and returns within the abandon window keeps
+    # the SAME program (no fresh opener, no evict) and re-stamps the window so it is
+    # measured from the return, not the original identify.
     clock = _Clock(0.0)
     o = Orchestrator(["display-1"], clock=clock, presence_ttl_s=5.0,
                      abandon_ttl_s=lambda p: 900.0)
     o.on_identify("jason")               # t=0: opener playing on d1
-    clock.t = 7.0                        # jason's presence stale (>5s)
-    o.tick()                             # presence expires (tick-loop equivalent)
-    cmds = o.on_clip_ended("display-1")  # opener ends → program advances to ROUND2,
-    assert Idle("display-1") in cmds     # but jason not present → display idles
-    clock.t = 600.0                      # back within the 900s window
+    o.on_clip_ended("display-1")         # opener ends → program advances to ROUND2
+    assert o._programs["jason"].round == Round.ROUND2
+    clock.t = 7.0                        # jason's presence stale (>5s), program NOT swept (<900s)
+    o.tick()
+    clock.t = 600.0                      # returns within the 900s window
     cmds = o.on_identify("jason")
     assert not any(isinstance(c, EvictRender) for c in cmds)
-    plays = [c for c in cmds if isinstance(c, Play)]
-    assert plays and plays[0].round == Round.ROUND2   # resumes, no restart
-    assert o._programs["jason"].last_present == 600.0  # window re-stamped
+    assert o._programs["jason"].round == Round.ROUND2   # same program, not a fresh opener
+    assert o._programs["jason"].last_present == 600.0   # window re-stamped to the return
     # leave again → fresh full window measured from t=600, not t=0
     clock.t = 1499.0                     # 899s since last_present → still safe
     cmds = o.tick()
