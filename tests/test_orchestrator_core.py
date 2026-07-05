@@ -148,3 +148,138 @@ def test_remaining_active_person_reclaims_displays_after_other_leaves():
     cmds = o.on_clip_ended("display-2")
     owners = {c.owner for c in cmds if isinstance(c, Play)}
     assert owners == {"maria"}
+
+
+# ---- abandoned-program TTL sweep (issue #36) ----
+
+
+def test_abandoned_mid_round_program_swept_after_ttl_fresh_opener_on_return():
+    clock = _Clock(0.0)
+    o = Orchestrator(["display-1"], clock=clock, presence_ttl_s=5.0,
+                     abandon_ttl_s=lambda p: 900.0)
+    o.on_identify("jason")               # t=0: opener playing on d1
+    clock.t = 901.0                      # 901 > 900 → abandoned
+    cmds = o.tick()
+    assert EvictRender("jason") in cmds
+    assert "jason" not in o._programs    # program forgotten
+    o.on_clip_ended("display-1")         # stale clip ends → display idles
+    clock.t = 902.0
+    cmds = o.on_identify("jason")        # returning visitor → fresh program
+    assert Play("display-1", "jason", Round.OPENER, 0) in cmds
+    assert o._programs["jason"].first_seen == 902.0
+
+
+def test_return_within_ttl_resumes_round2_no_evict_and_restamps_window():
+    clock = _Clock(0.0)
+    o = Orchestrator(["display-1"], clock=clock, presence_ttl_s=5.0,
+                     abandon_ttl_s=lambda p: 900.0)
+    o.on_identify("jason")               # t=0: opener playing on d1
+    clock.t = 7.0                        # jason's presence stale (>5s)
+    o.tick()                             # presence expires (tick-loop equivalent)
+    cmds = o.on_clip_ended("display-1")  # opener ends → program advances to ROUND2,
+    assert Idle("display-1") in cmds     # but jason not present → display idles
+    clock.t = 600.0                      # back within the 900s window
+    cmds = o.on_identify("jason")
+    assert not any(isinstance(c, EvictRender) for c in cmds)
+    plays = [c for c in cmds if isinstance(c, Play)]
+    assert plays and plays[0].round == Round.ROUND2   # resumes, no restart
+    assert o._programs["jason"].last_present == 600.0  # window re-stamped
+    # leave again → fresh full window measured from t=600, not t=0
+    clock.t = 1499.0                     # 899s since last_present → still safe
+    cmds = o.tick()
+    assert not any(isinstance(c, EvictRender) for c in cmds)
+    assert "jason" in o._programs
+
+
+def test_return_after_sweep_gets_fresh_opener():
+    clock = _Clock(0.0)
+    o = Orchestrator(["display-1"], clock=clock, presence_ttl_s=5.0,
+                     abandon_ttl_s=lambda p: 900.0)
+    o.on_identify("jason")               # t=0: opener playing on d1
+    clock.t = 901.0
+    o.tick()                             # sweep: program forgotten
+    o.on_clip_ended("display-1")         # stale clip ends → display idles
+    clock.t = 960.0
+    cmds = o.on_identify("jason")        # return after the sweep
+    assert Play("display-1", "jason", Round.OPENER, 0) in cmds
+    assert o._programs["jason"].round == Round.OPENER
+
+
+def test_abandon_ttl_boundary_exactly_900_does_not_expire():
+    clock = _Clock(0.0)
+    o = Orchestrator(["display-1"], clock=clock, presence_ttl_s=5.0)  # default TTL 900
+    o.on_identify("jason")
+    assert o._programs["jason"].last_present == 0.0  # initialized to first_seen
+    clock.t = 900.0                      # exactly the TTL → strict >, NOT expired
+    cmds = o.tick()
+    assert not any(isinstance(c, EvictRender) for c in cmds)
+    assert "jason" in o._programs
+
+
+def test_heartbeating_person_never_expires_across_20_minutes():
+    # Highest-value test: catches a missing last_present re-stamp in on_presence.
+    # Heartbeat every 60s, then tick 10s later while the presence TTL (5s) has the
+    # person OUT of _present — survival then depends solely on last_present.
+    clock = _Clock(0.0)
+    o = Orchestrator(["display-1"], clock=clock, presence_ttl_s=5.0,
+                     abandon_ttl_s=lambda p: 900.0)
+    o.on_identify("jason")
+    evicts = []
+    for k in range(1, 21):               # 20 simulated minutes
+        clock.t = 60.0 * k
+        evicts += [c for c in o.on_presence(["jason"]) if isinstance(c, EvictRender)]
+        clock.t = 60.0 * k + 10.0        # presence stale; only last_present protects
+        evicts += [c for c in o.tick() if isinstance(c, EvictRender)]
+    assert evicts == []
+    assert "jason" in o._programs
+
+
+def test_done_program_swept_after_ttl_without_second_evict():
+    # DONE entries were already evicted at their boundary (issue #27); the sweep
+    # must GC the leaked dict entry WITHOUT a duplicate EvictRender.
+    clock = _Clock(0.0)
+    o = Orchestrator(["display-1"], clock=clock, presence_ttl_s=5.0,
+                     abandon_ttl_s=lambda p: 900.0)
+    o.on_identify("jason")
+    o.on_clip_ended("display-1")         # → ROUND2
+    done = o.on_clip_ended("display-1")  # → DONE (EvictRender at the boundary)
+    assert EvictRender("jason") in done
+    clock.t = 901.0
+    cmds = o.tick()
+    assert "jason" not in o._programs    # leaked DONE entry GC'd
+    assert not any(isinstance(c, EvictRender) for c in cmds)  # no duplicate
+
+
+def test_abandon_ttl_policy_is_read_at_eval_time():
+    # Flipping the policy value between ticks must change behavior WITHOUT
+    # rebuilding the Orchestrator (env/config is read through the callable).
+    clock = _Clock(0.0)
+    ttl = {"value": 900.0}
+    o = Orchestrator(["display-1"], clock=clock, presence_ttl_s=5.0,
+                     abandon_ttl_s=lambda p: ttl["value"])
+    o.on_identify("jason")
+    clock.t = 100.0
+    cmds = o.tick()                      # 100 < 900 → intact
+    assert not any(isinstance(c, EvictRender) for c in cmds)
+    ttl["value"] = 10.0                  # provider flips 900 → 10
+    cmds = o.tick()                      # 100 > 10 → swept on the very next tick
+    assert EvictRender("jason") in cmds
+    assert "jason" not in o._programs
+
+
+def test_sweep_is_per_subject_only_silent_person_evicted():
+    clock = _Clock(0.0)
+    o = Orchestrator(["display-1", "display-2"], clock=clock, presence_ttl_s=5.0,
+                     abandon_ttl_s=lambda p: 900.0)
+    o.on_identify("jason")               # t=0, then silent forever
+    clock.t = 1.0
+    o.on_identify("maria")
+    for k in range(1, 4):                # maria heartbeats at t=300/600/900
+        clock.t = 300.0 * k
+        o.on_presence(["maria"])
+    clock.t = 901.5                      # jason: 901.5s silent; maria: 1.5s
+    cmds = o.tick()
+    evicts = [c for c in cmds if isinstance(c, EvictRender)]
+    assert evicts == [EvictRender("jason")]
+    assert "jason" not in o._programs
+    assert "maria" in o._programs
