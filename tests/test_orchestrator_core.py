@@ -174,7 +174,8 @@ def test_return_within_ttl_resumes_round2_no_evict_and_restamps_window():
     o = Orchestrator(["display-1"], clock=clock, presence_ttl_s=5.0,
                      abandon_ttl_s=lambda p: 900.0)
     o.on_identify("jason")               # t=0: opener playing on d1
-    clock.t = 7.0                        # jason's presence already stale (>5s)
+    clock.t = 7.0                        # jason's presence stale (>5s)
+    o.tick()                             # presence expires (tick-loop equivalent)
     cmds = o.on_clip_ended("display-1")  # opener ends → program advances to ROUND2,
     assert Idle("display-1") in cmds     # but jason not present → display idles
     clock.t = 600.0                      # back within the 900s window

@@ -123,7 +123,13 @@ async def lifespan(app: FastAPI):
     from src.orchestrator.runtime import OrchestratorRuntime
     from src.orchestrator.renderer import Renderer
     displays = [f"display-{i}" for i in range(1, int(os.getenv("DISPLAY_COUNT", "4")) + 1)]
-    app.state.orchestrator = Orchestrator(displays)
+    # Env is the DEFAULT layer for the abandon TTL (future God View/campaign config may go
+    # LOWER); the max(..., 60) is only a sanity clamp against a pathological near-zero
+    # misconfig evict-thrashing a live demo.
+    app.state.orchestrator = Orchestrator(
+        displays,
+        abandon_ttl_s=lambda p: max(float(os.getenv("PROGRAM_ABANDON_TTL_S", "900")), 60.0),
+    )
     renderer = Renderer(
         app.state.db, app.state.http,
         compose=lambda sel, audio, tid, vid: _compose_variant(sel, audio, tid, vid),

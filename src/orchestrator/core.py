@@ -1,5 +1,6 @@
 import time
 from dataclasses import dataclass
+from typing import Callable
 
 from src.orchestrator.commands import EvictRender, Idle, Play, RenderAhead
 from src.orchestrator.model import Round, even_split, next_round, pair_slot
@@ -13,6 +14,9 @@ class _Program:
     # Camera screen_id from the trigger that (re)identified this subject. Threaded
     # onto Play/RenderAhead so the render lane can camera-scope its God View events.
     screen_id: str | None = None
+    # Last time this subject was seen (identify or presence heartbeat). Drives the
+    # abandon-TTL sweep in tick() (issue #36).
+    last_present: float = 0.0
 
 
 @dataclass
@@ -24,10 +28,14 @@ class _Screen:
 
 class Orchestrator:
     def __init__(self, displays: list[str], clock=time.monotonic,
-                 presence_ttl_s: float = 5.0) -> None:
+                 presence_ttl_s: float = 5.0,
+                 # Consolidation tripwire: the SECOND time/dwell-policy callable added
+                 # here → consolidate into a single policy object (issue #36 round-2 record).
+                 abandon_ttl_s: Callable[[_Program], float] = lambda p: 900.0) -> None:
         self._displays = list(displays)
         self._clock = clock
         self._ttl = presence_ttl_s
+        self._abandon_ttl_s = abandon_ttl_s
         self._programs: dict[str, _Program] = {}
         self._present: dict[str, float] = {}
         self._screens: dict[str, _Screen] = {d: _Screen() for d in self._displays}
@@ -38,10 +46,11 @@ class Orchestrator:
         now = self._clock()
         prog = self._programs.get(uuid)
         if prog is None or prog.round == Round.DONE:
-            self._programs[uuid] = _Program(uuid, first_seen=now)
+            self._programs[uuid] = _Program(uuid, first_seen=now, last_present=now)
         # Always stamp the latest triggering camera so the render lane resolves
         # scope from wherever this subject was most recently seen.
         self._programs[uuid].screen_id = screen_id
+        self._programs[uuid].last_present = now
         self._present[uuid] = now
         return self._reassign()
 
@@ -67,6 +76,8 @@ class Orchestrator:
         now = self._clock()
         for uuid in uuids:
             self._present[uuid] = now
+            if uuid in self._programs:
+                self._programs[uuid].last_present = now
         return self.tick()
 
     def tick(self) -> list:
@@ -74,7 +85,19 @@ class Orchestrator:
         expired = [u for u, seen in self._present.items() if now - seen > self._ttl]
         for u in expired:
             del self._present[u]
-        return self._reassign()
+        # Abandon-TTL sweep (issue #36): forget programs whose subject has been gone
+        # longer than the policy window so a returning visitor restarts with a fresh
+        # opener. Also GCs leaked DONE entries — those were already evicted at their
+        # program boundary (issue #27), so no duplicate EvictRender for them.
+        cmds: list = []
+        for u, p in list(self._programs.items()):
+            if u in self._present:
+                continue
+            if now - p.last_present > self._abandon_ttl_s(p):
+                del self._programs[u]
+                if p.round != Round.DONE:
+                    cmds.append(EvictRender(u))
+        return cmds + self._reassign()
 
     # ---- internals ----
 
