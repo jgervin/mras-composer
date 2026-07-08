@@ -134,3 +134,68 @@ async def test_selections_carry_person_name_for_kiosk_debug():
     db = _db(_identity_row(name="Ragnar"), [_ad_row("neon")])
     out = await select_variants(_trigger(), db, count=1)
     assert out[0].person_name == "Ragnar"
+
+
+# ---------------------------------------------------------------------------
+# TODO-7: perception-ranked variant ordering (targeting_supported=True).
+# select() runs inside select_variants(), so with the flag on BOTH ad lookups
+# go through db.fetch — the dispatcher below routes on the SQL itself.
+# ---------------------------------------------------------------------------
+
+_SCENE_SAD = {"viewer": {"mood": "sad", "mood_confidence": 0.9},
+              "objects": [], "faces_tracked": 1}
+
+
+def _targeted_ad_row(slug, targeting=None):
+    return {**_ad_row(slug), "targeting": targeting}
+
+
+def _db_targeting(variant_rows, identity=None):
+    """fetch dispatcher: select()'s candidate query (created_at DESC) vs the
+    variants query (random()); fetchrow serves both identity lookups."""
+    db = AsyncMock()
+    db.fetchrow = AsyncMock(return_value=identity or _identity_row())
+
+    async def fetch(q, *a):
+        rows = [dict(r) for r in variant_rows]
+        if "random()" in q:
+            return rows
+        assert "created_at DESC" in q, f"unexpected fetch SQL: {q}"
+        return rows  # candidate pool: same catalog, newest-first is irrelevant here
+
+    db.fetch = AsyncMock(side_effect=fetch)
+    return db
+
+
+def _trigger_sad():
+    return {**_trigger(), "scene_context": _SCENE_SAD}
+
+
+async def test_matching_variant_moves_to_display_1():
+    db = _db_targeting([_targeted_ad_row("neon"),
+                        _targeted_ad_row("fish", {"moods": ["sad"]})])
+    out = await select_variants(_trigger_sad(), db, count=2, targeting_supported=True)
+    assert [s.composition_id for s in out] == ["comp-fish", "comp-neon"]
+
+
+async def test_empty_signals_preserve_incoming_variant_order():
+    db = _db_targeting([_targeted_ad_row("neon"),
+                        _targeted_ad_row("fish", {"moods": ["sad"]})])
+    out = await select_variants({**_trigger(), "scene_context": {}}, db,
+                                count=2, targeting_supported=True)
+    assert [s.composition_id for s in out] == ["comp-neon", "comp-fish"]
+
+
+async def test_targeting_variants_query_selects_targeting_column():
+    db = _db_targeting([_targeted_ad_row("neon")])
+    await select_variants(_trigger_sad(), db, count=2, targeting_supported=True)
+    variant_query = next(c.args[0] for c in db.fetch.call_args_list
+                         if "random()" in c.args[0])
+    assert "a.targeting" in variant_query
+
+
+async def test_legacy_variants_query_never_references_targeting():
+    # I2 deploy safety: default flag => today's SQL, safe on unmigrated DBs.
+    db = _db(_identity_row(), [_ad_row("neon")])
+    await select_variants(_trigger(), db, count=2)
+    assert "targeting" not in db.fetch.call_args.args[0]

@@ -3,7 +3,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from src.selector.selector import select, AdSelection
+from src.selector.selector import select, targeting_column_exists, AdSelection
 
 _FAKE_VIDEO = Path("/fake/standard.mp4")
 # Valid (but arbitrary) UUID: select() rejects non-UUID triggers before querying.
@@ -201,3 +201,134 @@ async def test_invalid_uuid_trigger_returns_standard_without_db_query():
         result = await select({"uuid": "no-such-profile-id", "is_new_visitor": False}, db)
     assert result.type == "standard"
     db.fetchrow.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# TODO-7: perception-driven re-ranking (targeting_supported=True) + deploy
+# safety (I2: the flag is probed once at lifespan startup; False = today's
+# legacy SELECT, so an unmigrated DB can never raise UndefinedColumn).
+# ---------------------------------------------------------------------------
+
+# Real payload shape sampled from the dev DB (events, event_type='detection').
+_SCENE_SAD = {
+    "viewer": {"mood": "sad", "track_id": "t-6", "attending": True,
+               "evidence_frames": 22, "mood_confidence": 0.72},
+    "objects": [{"bbox": [394, 363, 1077, 715], "color": "black",
+                 "label": "person", "source": "yolo11n", "confidence": 0.82}],
+    "faces_tracked": 1,
+}
+
+
+def _ad_row(slug, targeting=None):
+    return {"ad_id": f"ad-{slug}", "component_id": f"comp-{slug}",
+            "base_video": "/assets/standard.mp4", "slug": slug,
+            "default_props": {"color": "#fff"}, "personalized_field": "text",
+            "targeting": targeting}
+
+
+def _db_targeting(ad_rows, name="Jason") -> AsyncMock:
+    """DB mock for the targeting_supported=True path: identity via fetchrow,
+    ad candidates via fetch (newest-first, as the SQL orders them)."""
+    db = AsyncMock()
+    db.fetchrow = AsyncMock(return_value={"name": name, "is_blocked": False})
+    db.fetch = AsyncMock(return_value=[dict(r) for r in ad_rows])
+    return db
+
+
+async def test_targeting_probe_true_when_column_exists():
+    db = AsyncMock()
+    db.fetchrow = AsyncMock(return_value={"1": 1})
+    assert await targeting_column_exists(db) is True
+    query = db.fetchrow.call_args.args[0]
+    assert "information_schema.columns" in query
+    assert "targeting" in query
+
+
+async def test_targeting_probe_false_when_column_absent():
+    db = AsyncMock()
+    db.fetchrow = AsyncMock(return_value=None)
+    assert await targeting_column_exists(db) is False
+
+
+async def test_mood_matching_older_ad_beats_newer_untargeted_ad():
+    db = _db_targeting([_ad_row("new"), _ad_row("old", {"moods": ["sad"]})])
+    with patch("src.selector.selector._STANDARD_VIDEO", _FAKE_VIDEO):
+        result = await select(
+            {"uuid": _UUID, "is_new_visitor": False, "scene_context": _SCENE_SAD},
+            db, targeting_supported=True)
+    assert result.type == "personalized"
+    assert result.ad_id == "ad-old"
+    assert result.decision_factors["perception"]["match_score"] == 2
+    assert result.decision_factors["perception"]["mood"] == "sad"
+
+
+async def test_empty_scene_context_picks_newest_row_with_no_factors():
+    # Byte-for-byte guard: no perception => the created_at DESC head wins,
+    # exactly the row today's LIMIT 1 returns.
+    db = _db_targeting([_ad_row("new", {"moods": ["sad"]}), _ad_row("old")])
+    with patch("src.selector.selector._STANDARD_VIDEO", _FAKE_VIDEO):
+        result = await select(
+            {"uuid": _UUID, "is_new_visitor": False, "scene_context": {}},
+            db, targeting_supported=True)
+    assert result.ad_id == "ad-new"
+    assert result.decision_factors is None
+
+
+async def test_null_targeting_everywhere_keeps_newest_row_with_no_factors():
+    db = _db_targeting([_ad_row("new"), _ad_row("old")])
+    with patch("src.selector.selector._STANDARD_VIDEO", _FAKE_VIDEO):
+        result = await select(
+            {"uuid": _UUID, "is_new_visitor": False, "scene_context": _SCENE_SAD},
+            db, targeting_supported=True)
+    assert result.ad_id == "ad-new"
+    assert result.decision_factors is None
+
+
+async def test_object_label_match_reranks():
+    scene = {"viewer": {}, "objects": [{"label": "backpack", "confidence": 0.9}]}
+    db = _db_targeting([_ad_row("new"), _ad_row("old", {"objects": ["backpack"]})])
+    with patch("src.selector.selector._STANDARD_VIDEO", _FAKE_VIDEO):
+        result = await select(
+            {"uuid": _UUID, "is_new_visitor": False, "scene_context": scene},
+            db, targeting_supported=True)
+    assert result.ad_id == "ad-old"
+    assert result.decision_factors["perception"]["match_score"] == 1
+    assert result.decision_factors["perception"]["objects"] == ["backpack"]
+
+
+async def test_enrichment_never_converts_personalized_to_standard():
+    # Zero eligible ads + populated scene_context: still the personalized
+    # text-overlay fallback — enrichment re-ranks, never filters or empties.
+    db = _db_targeting([])
+    with patch("src.selector.selector._STANDARD_VIDEO", _FAKE_VIDEO):
+        result = await select(
+            {"uuid": _UUID, "is_new_visitor": False, "scene_context": _SCENE_SAD},
+            db, targeting_supported=True)
+    assert result.type == "personalized"
+    assert result.ad_id is None
+    assert result.decision_factors is None
+
+
+async def test_targeting_query_selects_targeting_with_bounded_pool():
+    db = _db_targeting([_ad_row("new")])
+    with patch("src.selector.selector._STANDARD_VIDEO", _FAKE_VIDEO):
+        await select({"uuid": _UUID, "is_new_visitor": False,
+                      "scene_context": {}}, db, targeting_supported=True)
+    query = db.fetch.call_args.args[0]
+    assert "a.targeting" in query
+    assert "ORDER BY a.created_at DESC LIMIT 10" in query
+
+
+async def test_legacy_variant_uses_todays_select_and_never_references_targeting():
+    # I2 deploy safety: flag off (the default) => today's fetchrow LIMIT 1 SQL
+    # without a.targeting — an unmigrated DB can never raise UndefinedColumn.
+    db = _db(name="Jason")
+    with patch("src.selector.selector._STANDARD_VIDEO", _FAKE_VIDEO):
+        result = await select({"uuid": _UUID, "is_new_visitor": False,
+                               "scene_context": _SCENE_SAD}, db)
+    assert result.type == "personalized"
+    assert result.decision_factors is None
+    db.fetch.assert_not_called()
+    ad_query = db.fetchrow.call_args_list[1].args[0]
+    assert "targeting" not in ad_query
+    assert "LIMIT 1" in ad_query
