@@ -57,6 +57,51 @@ async def test_name_overlay_spec_duration_is_fraction_of_base():
     assert specs[0].text == "Ragnar"
 
 
+def _sel_component_personalized(slug="helloname", field="text", name="Jason"):
+    return AdSelection(
+        type="personalized", base_video=Path("/assets/standard.mp4"),
+        tts_text=f"Welcome, {name}!", person_uuid="u1",
+        composition_id=f"comp-{slug}", overlay_props={field: name},
+        person_name=name, personalized_field=field,
+    )
+
+
+async def test_component_personalized_selection_yields_exactly_one_name_source():
+    """TODO-9: when the bound component itself renders the name (composition_id +
+    personalized_field both set), the always-on name overlay must NOT also fire —
+    otherwise the viewer's name is composited twice."""
+    custom_inserts = [(Path("/tmp/custom.mov"), 0, 8000)]
+    main.app.state.db = AsyncMock()
+    main.app.state.http = AsyncMock()
+    build_text = AsyncMock(return_value=[(Path("/tmp/name.mov"), 500, 8000)])
+    with patch("main.build_custom_overlay_inserts", AsyncMock(return_value=custom_inserts)), \
+         patch("main.build_overlay_inserts_http", build_text), \
+         patch("main.probe_video", MagicMock(return_value=_meta())):
+        inserts = await main._render_overlay_inserts(_sel_component_personalized(), "t1")
+    assert inserts == custom_inserts     # component insert only — one name source
+    build_text.assert_not_awaited()      # the always-on overlay must not fire
+
+
+async def test_base_video_only_personalized_selection_still_gets_overlay():
+    """TODO-9 regression guard: with no bound component at all (composition_id is
+    None — the text-overlay fallback path), the always-on name overlay remains the
+    ONLY and REQUIRED name source."""
+    text_inserts = [(Path("/tmp/name.mov"), 500, 8000)]
+    main.app.state.db = AsyncMock()
+    main.app.state.http = AsyncMock()
+    sel = AdSelection(
+        type="personalized", base_video=Path("/assets/standard.mp4"),
+        tts_text="Welcome, Jason!", person_uuid="u1",
+        overlay_text="Jason", person_name="Jason",
+    )
+    with patch("main.build_custom_overlay_inserts", AsyncMock()) as build_custom, \
+         patch("main.build_overlay_inserts_http", AsyncMock(return_value=text_inserts)), \
+         patch("main.probe_video", MagicMock(return_value=_meta())):
+        inserts = await main._render_overlay_inserts(sel, "t1")
+    build_custom.assert_not_awaited()   # no component bound at all
+    assert inserts == text_inserts
+
+
 async def test_custom_overlay_duration_defaults_to_fraction_of_base():
     rendered = {}
 
