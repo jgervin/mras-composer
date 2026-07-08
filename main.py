@@ -257,9 +257,14 @@ async def presence_endpoint(body: PresencePayload):
 async def _render_overlay_inserts(selection, trigger_id: str):
     """Best-effort overlays for one selection — any failure ships the ad with
     whatever rendered (never drop the ad). Owner rule: a spoken name is ALWAYS
-    also written, so the animated name-text overlay is composited on top of
-    every personalized variant, custom-Remotion component or not."""
+    also written — UNLESS the bound custom component already renders it
+    (composition_id set AND the ad's personalized_field names the prop it
+    injected the name into, TODO-9). In that case the component IS the name
+    source and the animated name-text overlay would double it. The overlay
+    remains the fallback for base-video-only personalization and for any
+    component-bound ad whose personalized_field is left empty."""
     inserts = []
+    personalizes_via_component = bool(selection.composition_id and selection.personalized_field)
     if selection.composition_id:
         try:
             work = Path(tempfile.mkdtemp(prefix="overlay_", dir=_OUTPUT_DIR))
@@ -270,7 +275,7 @@ async def _render_overlay_inserts(selection, trigger_id: str):
         except Exception as exc:
             await _log(app.state.db, trigger_id, "overlay", "error", {"error": str(exc)})
     name = selection.person_name or selection.overlay_text
-    if name:
+    if name and not personalizes_via_component:
         try:
             meta = probe_video(selection.base_video)
             spec = replace(
