@@ -23,7 +23,8 @@ from src.overlay.http_renderer import build_overlay_inserts_http, render_composi
 from src.overlay.probe import probe_video
 from src.overlay.spec import default_overlay_spec
 from src.orchestrator.watchdog import Watchdog
-from src.selector.selector import select
+from src.selector.scene_cache import SceneContextCache
+from src.selector.selector import select, targeting_column_exists
 from src.tts.gateway import synthesize
 
 logging.basicConfig(level=logging.INFO)
@@ -134,6 +135,11 @@ async def lifespan(app: FastAPI):
     # Generous timeout: spanning a full clip means the sidecar renders more frames (a few–tens of seconds).
     app.state.http = httpx.AsyncClient(timeout=180)
     app.state.ws = WSManager()
+    # TODO-7: subject -> scene_context handoff from /trigger to render-time
+    # selection, plus the ONE-time ads.targeting probe (I2 deploy safety: an
+    # unmigrated DB keeps the legacy SELECT — never UndefinedColumn mid-trigger).
+    app.state.scene_ctx = SceneContextCache()
+    app.state.ads_targeting = await targeting_column_exists(app.state.db)
 
     from src.orchestrator.core import Orchestrator
     from src.orchestrator.runtime import OrchestratorRuntime
@@ -148,6 +154,8 @@ async def lifespan(app: FastAPI):
         compose=lambda sel, audio, tid, vid: _compose_variant(sel, audio, tid, vid),
         url_for=lambda p: f"http://{_HOST}:{_PORT}/media/{p.name}",
         synthesize=synthesize,
+        scene_ctx_for=app.state.scene_ctx.get,
+        targeting_supported=app.state.ads_targeting,
     )
 
     async def _send_play(display, url, owner, rnd, trigger_id):
@@ -315,10 +323,15 @@ async def trigger_endpoint(body: TriggerPayload):
 
     # Standard gate FIRST (cheap query): strangers and blocked people must not
     # enter orchestration (which would reserve displays / spend a render slot).
-    gate = await select(trigger, app.state.db)
+    gate = await select(trigger, app.state.db, targeting_supported=app.state.ads_targeting)
     if gate.type == "standard":
         await _log(app.state.db, body.trigger_id, "composition", "standard_selected", {})
         return {"status": "standard"}
+
+    # TODO-7 (I1): cache the triggering frame's perception AFTER the gate —
+    # only subjects that actually enter orchestration; the renderer's re-select
+    # inside Renderer.render() picks it up seconds later via scene_ctx_for.
+    app.state.scene_ctx.put(subject, body.scene_context)
 
     # Temporal orchestration: hand the identity to the pure state machine and
     # apply whatever commands fall out (play the opener now, render-ahead round
@@ -333,7 +346,8 @@ async def trigger_endpoint(body: TriggerPayload):
 
 
 async def _trigger_single_broadcast(body: TriggerPayload):
-    selection = await select(body.model_dump(), app.state.db)
+    selection = await select(body.model_dump(), app.state.db,
+                             targeting_supported=app.state.ads_targeting)
 
     if selection.type == "standard":
         await _log(app.state.db, body.trigger_id, "composition", "standard_selected", {})

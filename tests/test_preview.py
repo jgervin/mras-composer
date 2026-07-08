@@ -66,7 +66,13 @@ def test_preview_bad_component_id_is_graceful_not_500():
     # /preview must catch it and return JSON {"error": ...} with 200 — NOT an unhandled
     # 500, which carries no CORS header and shows as "Failed to fetch" in the browser.
     db = AsyncMock()
-    db.fetchrow = AsyncMock(side_effect=Exception("invalid UUID 'comp-fallingsnow'"))
+
+    async def _fetchrow(q, *a):
+        if "information_schema" in q:  # lifespan's ads.targeting probe (TODO-7)
+            return None
+        raise Exception("invalid UUID 'comp-fallingsnow'")
+
+    db.fetchrow = AsyncMock(side_effect=_fetchrow)
     db.execute = AsyncMock()
     db.close = AsyncMock()
     p = patch("main.create_pool", AsyncMock(return_value=db))

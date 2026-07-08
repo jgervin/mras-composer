@@ -39,7 +39,7 @@ import uuid
 import asyncpg
 import pytest
 
-from src.selector.selector import select, select_variants
+from src.selector.selector import select, select_variants, targeting_column_exists
 
 _REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -285,6 +285,71 @@ async def test_select_variants_filters_and_cycles(db, seeded_ad_catalog):
     five = await select_variants(_trigger(KNOWN_NAMED_UUID), db, 5)
     assert len(five) == 5
     assert {v.ad_id for v in five} == {AD_A_UUID, AD_B_UUID}
+
+
+# ---------------------------------------------------------------------------
+# TODO-7 perception targeting (026_ads_targeting.sql): real-SQL exercise of
+# BOTH I2 variants — the probe, the new SELECT (a.targeting + LIMIT 10 +
+# re-rank), and the legacy SELECT (existing tests above run with the default
+# targeting_supported=False and never reference the column).
+# ---------------------------------------------------------------------------
+
+_SCENE_SAD = {"viewer": {"mood": "sad", "mood_confidence": 0.9, "attending": True,
+                         "evidence_frames": 22},
+              "objects": [], "faces_tracked": 1}
+
+
+@pytest.fixture
+async def targeted_ad_catalog(db, seeded_ad_catalog):
+    """Layer 026's column onto the seeded catalog inside the same rolled-back
+    transaction (savepoint), independent of whether the migration set already
+    contains 026 — so this file tests the new variant either way."""
+    await db.execute("ALTER TABLE ads ADD COLUMN IF NOT EXISTS targeting jsonb")
+    # AD_B is the OLDEST eligible ad: without perception the newest (AD_A) wins,
+    # so AD_B winning under a sad scene proves the re-rank ran in real SQL.
+    await db.execute(
+        f"UPDATE ads SET targeting = '{{\"moods\": [\"sad\"]}}' WHERE id = '{AD_B_UUID}'"
+    )
+    yield seeded_ad_catalog
+
+
+async def test_targeting_probe_reflects_real_column_presence(db):
+    tr = db.transaction()
+    await tr.start()
+    try:
+        await db.execute("ALTER TABLE ads DROP COLUMN IF EXISTS targeting")
+        assert await targeting_column_exists(db) is False
+        await db.execute("ALTER TABLE ads ADD COLUMN targeting jsonb")
+        assert await targeting_column_exists(db) is True
+    finally:
+        await tr.rollback()
+
+
+async def test_targeting_select_reranks_on_real_schema(db, targeted_ad_catalog):
+    trigger = {**_trigger(KNOWN_NAMED_UUID), "scene_context": _SCENE_SAD}
+    sel = await select(trigger, db, targeting_supported=True)
+    assert sel.type == "personalized"
+    assert sel.ad_id == AD_B_UUID  # older sad-targeted ad beats newer AD_A
+    assert sel.decision_factors == {
+        "perception": {"mood": "sad", "objects": [], "match_score": 2}
+    }
+
+
+async def test_targeting_select_without_signals_matches_legacy_head(db, targeted_ad_catalog):
+    # Byte-for-byte guard on real SQL: empty scene_context => the created_at
+    # DESC head (AD_A), exactly what the legacy LIMIT 1 returns; factors None.
+    trigger = {**_trigger(KNOWN_NAMED_UUID), "scene_context": {}}
+    sel = await select(trigger, db, targeting_supported=True)
+    legacy = await select(_trigger(KNOWN_NAMED_UUID), db)
+    assert sel.ad_id == legacy.ad_id == AD_A_UUID
+    assert sel.decision_factors is None
+
+
+async def test_targeting_select_variants_puts_match_first_on_real_schema(db, targeted_ad_catalog):
+    trigger = {**_trigger(KNOWN_NAMED_UUID), "scene_context": _SCENE_SAD}
+    variants = await select_variants(trigger, db, 2, targeting_supported=True)
+    assert variants[0].ad_id == AD_B_UUID  # matched ad fills display-1 first
+    assert {v.ad_id for v in variants} == {AD_A_UUID, AD_B_UUID}
 
 
 async def test_ads_schema_defaults_flow_through_selector(db, seeded_ad_catalog):
