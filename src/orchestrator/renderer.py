@@ -53,19 +53,26 @@ class Renderer:
     """Compose the clip URL(s) for one (owner, round). Deps injected for tests;
     main.py wires them to the real compose/synthesize/url helpers."""
 
-    def __init__(self, db, http, compose, url_for, synthesize):
+    def __init__(self, db, http, compose, url_for, synthesize,
+                 scene_ctx_for=None, targeting_supported=False):
         self._db = db
         self._http = http
         self._compose = compose          # (selection, audio_path, trigger_id, variant_id) -> Path
         self._url_for = url_for          # Path -> str
         self._synthesize = synthesize    # (text, uuid, voice_id, http) -> Path | None
+        # TODO-7: owner -> scene_context lookup (main wires the SceneContextCache;
+        # default = no perception) + the lifespan-probed ads.targeting flag (I2).
+        self._scene_ctx_for = scene_ctx_for or (lambda owner: {})
+        self._targeting_supported = targeting_supported
 
     async def render(self, owner: str, rnd: Round, trigger_screen_id=None) -> tuple:
-        trigger = {"uuid": owner, "is_new_visitor": False}
+        trigger = {"uuid": owner, "is_new_visitor": False,
+                   "scene_context": self._scene_ctx_for(owner)}
         if rnd == Round.OPENER:
-            selections = [await select(trigger, self._db)]
+            selections = [await select(trigger, self._db, self._targeting_supported)]
         else:
-            selections = await select_variants(trigger, self._db, 2)
+            selections = await select_variants(trigger, self._db, 2,
+                                               self._targeting_supported)
         audio = await self._synthesize(
             selections[0].tts_text, selections[0].person_uuid, _VOICE_ID, self._http)
         # Per-flow trigger_id: a fresh uuid identifies THIS composition (ad_run) and
@@ -90,7 +97,8 @@ class Renderer:
                 "selected_ad_id": sel.ad_id,
                 "selected_creative_id": sel.component_id,
                 "target_subject_profile_id": sel.person_uuid,
-                "decision_factors": {},
+                # Perception match audit (TODO-7): what re-ranked this pick.
+                "decision_factors": sel.decision_factors or {},
             })
 
         # --- God View composition + ad_run open (representative = selections[0]) --
