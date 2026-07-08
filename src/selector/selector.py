@@ -27,6 +27,13 @@ class AdSelection:
     # no bound custom ad was found (text-overlay fallback / standard).
     ad_id: str | None = None
     component_id: str | None = None
+    # ads.personalized_field (TODO-9): the props key the selector overwrote with the
+    # person's name. Non-empty ⇒ the bound component itself renders that name, so the
+    # always-on text overlay in main._render_overlay_inserts must be skipped. A future
+    # non-name-rendering component's ad row can opt back into the overlay by leaving
+    # this column '' (empty string; the column is NOT NULL so it can't be None from
+    # the DB, but the dataclass default here covers selections built without an ad).
+    personalized_field: str | None = None
 
 
 async def select(trigger: dict, db) -> AdSelection:
@@ -76,6 +83,7 @@ async def select(trigger: dict, db) -> AdSelection:
             person_name=row["name"],
             ad_id=str(ad["ad_id"]) if ad["ad_id"] is not None else None,
             component_id=str(ad["component_id"]) if ad["component_id"] is not None else None,
+            personalized_field=ad["personalized_field"],
         )
 
     return AdSelection(
@@ -138,5 +146,6 @@ async def select_variants(trigger: dict, db, count: int) -> list[AdSelection]:
             person_name=name,
             ad_id=str(ad["ad_id"]) if ad["ad_id"] is not None else None,
             component_id=str(ad["component_id"]) if ad["component_id"] is not None else None,
+            personalized_field=ad["personalized_field"],
         ))
     return [variants[i % len(variants)] for i in range(count)]
