@@ -132,3 +132,37 @@ def test_no_tagged_kiosk_uses_legacy_broadcast_not_orchestrator():
             mocks["ws"].broadcast.assert_awaited_once()
         finally:
             _stop(client, mocks)
+
+
+# ---------------------------------------------------------------------------
+# TODO-7: /trigger populates the scene-context cache for the render-time
+# re-selection — but ONLY for subjects that pass the standard gate (I1):
+# strangers' fresh uuids must not feed the cache.
+# ---------------------------------------------------------------------------
+
+_SCENE = {"viewer": {"mood": "sad", "mood_confidence": 0.9},
+          "objects": [], "faces_tracked": 1}
+
+
+def test_orchestrated_trigger_caches_scene_context_for_subject():
+    client, mocks = _setup(_personalized())
+    try:
+        res = client.post("/trigger", json={"trigger_id": "t1", "uuid": "u1",
+                                            "is_new_visitor": False,
+                                            "scene_context": _SCENE})
+        assert res.json()["status"] == "orchestrated"
+        assert main.app.state.scene_ctx.get("u1") == _SCENE
+    finally:
+        _stop(client, mocks)
+
+
+def test_standard_gated_trigger_does_not_cache_scene_context():
+    client, mocks = _setup(_standard())
+    try:
+        res = client.post("/trigger", json={"trigger_id": "t1", "uuid": "u1",
+                                            "is_new_visitor": True,
+                                            "scene_context": _SCENE})
+        assert res.json()["status"] == "standard"
+        assert main.app.state.scene_ctx.get("u1") == {}
+    finally:
+        _stop(client, mocks)
