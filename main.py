@@ -406,7 +406,12 @@ async def preview_endpoint(body: PreviewPayload):
             return {"error": "unknown component"}
         # Trim stray whitespace so a copy-paste with a leading/trailing space doesn't make ffprobe fail.
         base_path = Path(body.base_video.strip())
-        meta = probe_video(base_path)
+        try:
+            meta = probe_video(base_path)
+        except Exception:
+            # Most often the base clip doesn't exist (e.g. a stale ad). Surface a human message
+            # rather than leaking the raw ffprobe command.
+            return {"error": f"Base video not found or unreadable: {base_path}"}
         props = {
             **body.props,
             "baseWidth": meta.width,
